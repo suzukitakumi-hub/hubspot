@@ -41,6 +41,11 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements-hubspot-course-update.txt
 
+      - name: Show checked out revision
+        run: |
+          git rev-parse HEAD
+          grep -n "audit.*skipped\\|if args.skip_promote\\|continue" scheduled_hubspot_course_update.py
+
       - name: Write Google service account JSON
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT }}
