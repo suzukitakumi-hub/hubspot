@@ -1,0 +1,76 @@
+name: HubSpot course sheet update
+
+on:
+  schedule:
+    # 08:00 JST every Tuesday and Friday = 23:00 UTC every Monday and Thursday.
+    - cron: "0 23 * * 1,4"
+  workflow_dispatch:
+    inputs:
+      months:
+        description: "Optional YYYY-MM values separated by spaces. Defaults to current JST month."
+        required: false
+        type: string
+      skip_promote:
+        description: "Run staging/validation/audit without live promotion."
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: hubspot-course-sheet-update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements-hubspot-course-update.txt
+
+      - name: Write Google service account JSON
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT }}
+        run: |
+          test -n "$GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT"
+          printf '%s' "$GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT" > "$RUNNER_TEMP/google-service-account.json"
+          chmod 600 "$RUNNER_TEMP/google-service-account.json"
+
+      - name: Update HubSpot course sheet
+        env:
+          HUBSPOT_PAT: ${{ secrets.HUBSPOT_PAT }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ runner.temp }}/google-service-account.json
+          GA4_PROPERTY_ID: ${{ secrets.GA4_PROPERTY_ID }}
+          HUBSPOT_COURSE_SPREADSHEET_ID: ${{ secrets.HUBSPOT_COURSE_SPREADSHEET_ID }}
+        run: |
+          args=()
+          if [ -n "${{ inputs.months }}" ]; then
+            args+=(--months ${{ inputs.months }})
+          fi
+          if [ "${{ inputs.skip_promote }}" = "true" ]; then
+            args+=(--skip-promote)
+          fi
+          python scheduled_hubspot_course_update.py "${args[@]}"
+
+      - name: Upload run logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hubspot-course-sheet-update-logs
+          path: |
+            logs/course_sheet_updates/
+            hubspot_course_sheet_validation_*.json
+            hubspot_course_sheet_live_audit_*.json
+            ga4_hubspot_cv_map_*_manifest.json
+            ga4_hubspot_cv_map_*_unmapped_keys.csv
+          if-no-files-found: ignore

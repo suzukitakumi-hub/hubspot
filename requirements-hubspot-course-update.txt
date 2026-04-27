@@ -1,0 +1,4 @@
+google-analytics-data>=0.18,<1
+google-auth>=2,<3
+gspread>=6,<7
+requests>=2,<3
