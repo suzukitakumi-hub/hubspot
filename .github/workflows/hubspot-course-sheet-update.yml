@@ -24,6 +24,8 @@ jobs:
   update:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
       - name: Checkout
@@ -34,6 +36,7 @@ jobs:
         with:
           python-version: "3.11"
           cache: "pip"
+          cache-dependency-path: requirements-hubspot-course-update.txt
 
       - name: Install dependencies
         run: pip install -r requirements-hubspot-course-update.txt
