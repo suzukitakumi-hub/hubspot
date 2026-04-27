@@ -132,6 +132,17 @@ def main() -> None:
                 pipeline_cmd.append("--skip-promote")
             run_logged(pipeline_cmd, run_log)
 
+            if args.skip_promote:
+                summary["results"].append(
+                    {
+                        "month": month,
+                        "promotion": "skipped",
+                        "audit": "skipped",
+                        "validation_report": validation_report,
+                    }
+                )
+                continue
+
             audit_cmd = [
                 sys.executable,
                 "audit_live_hubspot_course_sheet.py",
