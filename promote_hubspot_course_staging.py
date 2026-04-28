@@ -38,8 +38,16 @@ PARTIAL_GA4_ALLOWED_CODES = {
     "field_mismatch",
 }
 VOLATILE_PARTIAL_FIELDS = {
+    "配信数",
+    "開封数（bot除外）",
     "開封数（bot含む）",
+    "クリック数",
+    "配信停止数",
+    "開封率（bot除外）",
     "開封率（bot含む）",
+    "クリック率",
+    "クリックスルー率",
+    "配信停止率",
 }
 HYPERLINK_EMAIL_ID_RE = re.compile(r"/details/(\d+)/performance")
 
