@@ -5,6 +5,7 @@ import argparse
 import os
 import subprocess
 import sys
+import time
 
 from hubspot_course_sheet_guardrails import (
     DEFAULT_GA4_MAP_MAX_AGE_MINUTES,
@@ -77,13 +78,27 @@ def redact_command(command: list[str]) -> str:
     return " ".join(redacted)
 
 
-def run_step(name: str, command: list[str], allowed_exit_codes: tuple[int, ...] = (0,)) -> int:
-    print(f"step={name}")
-    print("command=" + redact_command(command))
-    completed = subprocess.run(command, check=False)
-    if completed.returncode not in allowed_exit_codes:
-        raise subprocess.CalledProcessError(completed.returncode, command)
-    return completed.returncode
+def run_step(
+    name: str,
+    command: list[str],
+    allowed_exit_codes: tuple[int, ...] = (0,),
+    attempts: int = 1,
+    retry_sleep_seconds: int = 30,
+) -> int:
+    last_returncode = 0
+    for attempt in range(1, attempts + 1):
+        print(f"step={name}")
+        print(f"attempt={attempt}/{attempts}")
+        print("command=" + redact_command(command))
+        completed = subprocess.run(command, check=False)
+        last_returncode = completed.returncode
+        if completed.returncode in allowed_exit_codes:
+            return completed.returncode
+        if attempt < attempts:
+            sleep_seconds = retry_sleep_seconds * attempt
+            print(f"retrying_step={name} sleep_seconds={sleep_seconds} returncode={completed.returncode}")
+            time.sleep(sleep_seconds)
+    raise subprocess.CalledProcessError(last_returncode, command)
 
 
 def main() -> None:
@@ -169,16 +184,21 @@ def main() -> None:
     ]
 
     if not args.skip_ga4_map_refresh:
-        run_step("build_ga4_map", ga4_map_cmd)
+        run_step("build_ga4_map", ga4_map_cmd, attempts=2)
 
-    run_step("write_staging", writer_cmd)
-    run_step("validate_staging", validator_cmd, allowed_exit_codes=(0, 1))
+    run_step("write_staging", writer_cmd, attempts=3)
+    validate_returncode = run_step("validate_staging", validator_cmd, allowed_exit_codes=(0, 1), attempts=3)
+    if not os.path.exists(validation_report_path):
+        raise SystemExit(
+            f"Validation report was not created after validate_staging. "
+            f"Promotion aborted. validation_returncode={validate_returncode} path={validation_report_path}"
+        )
 
     if args.skip_promote:
         print("promotion=skipped")
         return
 
-    run_step("promote_live", promote_cmd)
+    run_step("promote_live", promote_cmd, attempts=2)
 
 
 if __name__ == "__main__":
