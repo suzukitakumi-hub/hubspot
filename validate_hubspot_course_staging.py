@@ -92,6 +92,11 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Write validation JSON to this path. Defaults to hubspot_course_sheet_validation_<month>.json",
     )
+    parser.add_argument(
+        "--source-snapshot-json",
+        default="",
+        help="Reusable source snapshot JSON created by build_hubspot_course_source_snapshot.py.",
+    )
     return parser.parse_args()
 
 
@@ -693,7 +698,7 @@ def compare_staging_to_source(
 def main() -> None:
     args = parse_args()
     token = (args.hubspot_token or "").strip()
-    if not token:
+    if not token and not args.source_snapshot_json:
         raise SystemExit("HubSpot token is missing. Set HUBSPOT_PAT or pass --hubspot-token.")
     if not os.path.exists(args.service_account_json):
         raise SystemExit(f"Service account json not found: {args.service_account_json}")
@@ -722,15 +727,21 @@ def main() -> None:
     display_snapshot_hash = snapshot_sha256(display_snapshot)
     formula_snapshot_hash = snapshot_sha256(formula_snapshot)
 
-    client = HubSpotClient(token)
-    source_contexts, source_ids_by_course, provisional_rows, hubspot_only_rows, management_unmatched_rows = build_source_contexts(
-        client=client,
-        month=args.month,
-        email_type=args.email_type,
-        ga4_map=ga4_map,
-        provisional_days=args.provisional_days,
-        service_account_json=args.service_account_json,
-    )
+    if args.source_snapshot_json:
+        from hubspot_course_source_snapshot import load_source_snapshot, unpack_source_snapshot
+
+        source_snapshot = load_source_snapshot(args.source_snapshot_json, month=args.month, email_type=args.email_type)
+        source_contexts, source_ids_by_course, provisional_rows, hubspot_only_rows, management_unmatched_rows = unpack_source_snapshot(source_snapshot)
+    else:
+        client = HubSpotClient(token)
+        source_contexts, source_ids_by_course, provisional_rows, hubspot_only_rows, management_unmatched_rows = build_source_contexts(
+            client=client,
+            month=args.month,
+            email_type=args.email_type,
+            ga4_map=ga4_map,
+            provisional_days=args.provisional_days,
+            service_account_json=args.service_account_json,
+        )
 
     relevant_source_ids = set(source_contexts.keys())
     ga4_missing_rows = sorted(
@@ -831,6 +842,7 @@ def main() -> None:
         "ga4_map_csv_path": os.path.abspath(args.ga4_map_csv),
         "ga4_map_manifest_path": os.path.abspath(manifest_path),
         "ga4_map_csv_sha256": manifest.get("detail_csv_sha256", ""),
+        "source_snapshot_json": os.path.abspath(args.source_snapshot_json) if args.source_snapshot_json else "",
         "staging_display_snapshot_sha256": display_snapshot_hash,
         "staging_formula_snapshot_sha256": formula_snapshot_hash,
         "provisional_days": args.provisional_days,
