@@ -661,19 +661,24 @@ class HubSpotClient:
     def get_with_retry(self, url: str, *, params: Optional[dict] = None, timeout: int = 120, retryable_statuses: Optional[set[int]] = None):
         retryable_statuses = retryable_statuses or {429, 500, 502, 503, 504}
         last_error: Optional[Exception] = None
-        for attempt in range(5):
+        for attempt in range(8):
             try:
                 resp = self.session.get(url, params=params, timeout=timeout)
             except request_exceptions.RequestException as exc:
                 last_error = exc
-                if attempt == 4:
+                if attempt == 7:
                     raise
-                time.sleep(2 * (attempt + 1))
+                time.sleep(min(90, 5 * (2**attempt)))
                 continue
             if resp.status_code in retryable_statuses:
-                if attempt == 4:
+                if attempt == 7:
                     resp.raise_for_status()
-                time.sleep(2 * (attempt + 1))
+                retry_after = resp.headers.get("Retry-After")
+                if retry_after and retry_after.isdigit():
+                    sleep_seconds = int(retry_after)
+                else:
+                    sleep_seconds = min(90, 5 * (2**attempt))
+                time.sleep(sleep_seconds)
                 continue
             return resp
         if last_error:
@@ -764,7 +769,8 @@ class HubSpotClient:
             params = {
                 "campaignId": campaign_key,
                 "eventType": "OPEN",
-                "limit": 1000,
+                # HubSpot frequently times out on large OPEN pages; smaller pages are slower but stable.
+                "limit": 250,
             }
             if offset:
                 params["offset"] = offset
