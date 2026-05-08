@@ -108,6 +108,11 @@ def parse_args() -> argparse.Namespace:
         default="hubspot_course_sheet_live_audit_2026-03.json",
         help="Write audit JSON to this path.",
     )
+    parser.add_argument(
+        "--source-snapshot-json",
+        default="",
+        help="Reusable source snapshot JSON created by build_hubspot_course_source_snapshot.py.",
+    )
     return parser.parse_args()
 
 
@@ -195,7 +200,7 @@ def blocked_ga4_email_ids(manifest: dict, source_contexts: Dict[str, dict], prov
 def main() -> None:
     args = parse_args()
     token = (args.hubspot_token or "").strip()
-    if not token:
+    if not token and not args.source_snapshot_json:
         raise SystemExit("HubSpot token is missing. Set HUBSPOT_PAT or pass --hubspot-token.")
     if not os.path.exists(args.service_account_json):
         raise SystemExit(f"Service account json not found: {args.service_account_json}")
@@ -214,15 +219,21 @@ def main() -> None:
     import gspread
     from update_test_hubspot_course_tabs import HubSpotClient
 
-    client = HubSpotClient(token)
-    source_contexts, source_ids_by_course, provisional_rows, hubspot_only_rows, management_unmatched_rows = build_source_contexts(
-        client=client,
-        month=args.month,
-        email_type=args.email_type,
-        ga4_map=ga4_map,
-        provisional_days=args.provisional_days,
-        service_account_json=args.service_account_json,
-    )
+    if args.source_snapshot_json:
+        from hubspot_course_source_snapshot import load_source_snapshot, unpack_source_snapshot
+
+        source_snapshot = load_source_snapshot(args.source_snapshot_json, month=args.month, email_type=args.email_type)
+        source_contexts, source_ids_by_course, provisional_rows, hubspot_only_rows, management_unmatched_rows = unpack_source_snapshot(source_snapshot)
+    else:
+        client = HubSpotClient(token)
+        source_contexts, source_ids_by_course, provisional_rows, hubspot_only_rows, management_unmatched_rows = build_source_contexts(
+            client=client,
+            month=args.month,
+            email_type=args.email_type,
+            ga4_map=ga4_map,
+            provisional_days=args.provisional_days,
+            service_account_json=args.service_account_json,
+        )
     blocked_email_ids, blocked_issues = blocked_ga4_email_ids(manifest, source_contexts, args.provisional_days)
     provisional_email_ids = {
         str(row.get("email_id", "")).strip()
@@ -444,6 +455,7 @@ def main() -> None:
         "generated_at": now_jst_iso(),
         "month": args.month,
         "spreadsheet_id": args.spreadsheet_id,
+        "source_snapshot_json": os.path.abspath(args.source_snapshot_json) if args.source_snapshot_json else "",
         "checked_rows": checked_rows,
         "per_course_rows": per_course_rows,
         "blocked_ga4_email_count": len(blocked_email_ids),
