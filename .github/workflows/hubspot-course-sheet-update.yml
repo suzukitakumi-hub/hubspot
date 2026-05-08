@@ -79,6 +79,7 @@ jobs:
             logs/course_sheet_updates/
             hubspot_course_sheet_validation_*.json
             hubspot_course_sheet_live_audit_*.json
+            hubspot_course_source_snapshot_*.json
             ga4_hubspot_cv_map_*_manifest.json
             ga4_hubspot_cv_map_*_unmapped_keys.csv
           if-no-files-found: ignore
