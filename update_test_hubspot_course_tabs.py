@@ -81,6 +81,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--email-type", default="BATCH_EMAIL")
     parser.add_argument("--skip-sheet", action="store_true", default=False)
+    parser.add_argument(
+        "--source-snapshot-json",
+        default="",
+        help="Reusable source snapshot JSON created by build_hubspot_course_source_snapshot.py.",
+    )
     return parser.parse_args()
 
 
@@ -830,7 +835,7 @@ def write_staging_tabs(
 def main() -> None:
     args = parse_args()
     token = (args.hubspot_token or "").strip()
-    if not token:
+    if not token and not args.source_snapshot_json:
         raise SystemExit("HubSpot token is missing. Set HUBSPOT_PAT or pass --hubspot-token.")
     if not os.path.exists(args.service_account_json):
         raise SystemExit(f"Service account json not found: {args.service_account_json}")
@@ -846,6 +851,34 @@ def main() -> None:
         raise SystemExit(f"GA4 map csv not found: {args.ga4_map_csv}")
 
     ga4_map = load_ga4_map(args.ga4_map_csv)
+    if args.source_snapshot_json:
+        from hubspot_course_source_snapshot import build_course_rows_from_snapshot, load_source_snapshot
+
+        snapshot = load_source_snapshot(args.source_snapshot_json, month=args.month, email_type=args.email_type)
+        course_rows = build_course_rows_from_snapshot(snapshot, args.month)
+        for c in TARGET_COURSES:
+            print(f"{c}_rows={len(course_rows[c])}")
+        if args.skip_sheet:
+            import csv
+
+            for c in TARGET_COURSES:
+                out = f"test_hubspot_{c}_{args.month}.csv"
+                with open(out, "w", encoding="utf-8-sig", newline="") as f:
+                    w = csv.writer(f)
+                    w.writerow(COURSE_SHEET_HEADER)
+                    w.writerows(course_rows[c])
+                print(f"output_csv=./{out}")
+            return
+
+        write_staging_tabs(
+            service_account_json=args.service_account_json,
+            spreadsheet_id=args.spreadsheet_id,
+            course_tabs=course_rows,
+        )
+        print(f"source_snapshot={os.path.abspath(args.source_snapshot_json)}")
+        print(f"staging_sheet_updated=https://docs.google.com/spreadsheets/d/{args.spreadsheet_id}/edit")
+        return
+
     management_index = load_management_index(args.service_account_json, args.month)
 
     start, end = month_bounds_utc(args.month)
