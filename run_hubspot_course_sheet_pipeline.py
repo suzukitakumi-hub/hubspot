@@ -61,6 +61,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--skip-promote", action="store_true", default=False)
     parser.add_argument("--skip-ga4-map-refresh", action="store_true", default=False)
+    parser.add_argument(
+        "--source-snapshot-json",
+        default="",
+        help="Path for the reusable source snapshot JSON.",
+    )
     return parser.parse_args()
 
 def redact_command(command: list[str]) -> str:
@@ -87,10 +92,13 @@ def run_step(
 ) -> int:
     last_returncode = 0
     for attempt in range(1, attempts + 1):
+        started = time.perf_counter()
         print(f"step={name}")
         print(f"attempt={attempt}/{attempts}")
         print("command=" + redact_command(command))
         completed = subprocess.run(command, check=False)
+        elapsed = time.perf_counter() - started
+        print(f"step_finished={name} attempt={attempt}/{attempts} returncode={completed.returncode} duration_seconds={elapsed:.3f}")
         last_returncode = completed.returncode
         if completed.returncode in allowed_exit_codes:
             return completed.returncode
@@ -111,6 +119,7 @@ def main() -> None:
 
     ga4_manifest_path = args.ga4_map_manifest or derive_ga4_map_manifest_path(args.ga4_map_csv)
     validation_report_path = args.validation_report or derive_validation_report_path(args.month)
+    source_snapshot_path = args.source_snapshot_json or f"hubspot_course_source_snapshot_{args.month}.json"
     ga4_map_cmd = [
         sys.executable,
         "map_ga4_cv_to_hubspot_emails.py",
@@ -122,6 +131,30 @@ def main() -> None:
         args.service_account_json,
         "--ga4-property-id",
         args.ga4_property_id,
+    ]
+    source_snapshot_cmd = [
+        sys.executable,
+        "build_hubspot_course_source_snapshot.py",
+        "--month",
+        args.month,
+        "--spreadsheet-id",
+        args.spreadsheet_id,
+        "--hubspot-token",
+        token,
+        "--service-account-json",
+        args.service_account_json,
+        "--ga4-map-csv",
+        args.ga4_map_csv,
+        "--ga4-map-manifest",
+        ga4_manifest_path,
+        "--max-ga4-map-age-minutes",
+        str(args.max_ga4_map_age_minutes),
+        "--provisional-days",
+        str(args.provisional_days),
+        "--email-type",
+        args.email_type,
+        "--output",
+        source_snapshot_path,
     ]
 
     writer_cmd = [
@@ -143,6 +176,8 @@ def main() -> None:
         args.email_type,
         "--hubspot-token",
         token,
+        "--source-snapshot-json",
+        source_snapshot_path,
     ]
     validator_cmd = [
         sys.executable,
@@ -167,6 +202,8 @@ def main() -> None:
         validation_report_path,
         "--hubspot-token",
         token,
+        "--source-snapshot-json",
+        source_snapshot_path,
     ]
     promote_cmd = [
         sys.executable,
@@ -186,6 +223,7 @@ def main() -> None:
     if not args.skip_ga4_map_refresh:
         run_step("build_ga4_map", ga4_map_cmd, attempts=2)
 
+    run_step("build_source_snapshot", source_snapshot_cmd, attempts=3)
     run_step("write_staging", writer_cmd, attempts=3)
     validate_returncode = run_step("validate_staging", validator_cmd, allowed_exit_codes=(0, 1), attempts=3)
     if not os.path.exists(validation_report_path):
