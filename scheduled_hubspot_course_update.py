@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from hubspot_course_sheet_guardrails import DEFAULT_SPREADSHEET_ID, JST
@@ -70,10 +71,15 @@ def default_months(include_previous_until_day: int) -> list[str]:
 
 
 def run_logged(command: list[str], log_file: Path) -> None:
+    started = time.perf_counter()
     with log_file.open("a", encoding="utf-8") as handle:
         handle.write("\n$ " + " ".join(command) + "\n")
+        handle.write(f"command_started_at={dt.datetime.now(JST).isoformat()}\n")
         handle.flush()
         completed = subprocess.run(command, stdout=handle, stderr=subprocess.STDOUT, check=False)
+        elapsed = time.perf_counter() - started
+        handle.write(f"command_finished_at={dt.datetime.now(JST).isoformat()}\n")
+        handle.write(f"command_returncode={completed.returncode} duration_seconds={elapsed:.3f}\n")
     if completed.returncode != 0:
         raise subprocess.CalledProcessError(completed.returncode, command)
 
@@ -110,6 +116,7 @@ def main() -> None:
     try:
         for month in months:
             ga4_map_csv = f"ga4_hubspot_cv_map_{month}_email_map.csv"
+            source_snapshot = f"hubspot_course_source_snapshot_{month}.json"
             validation_report = f"hubspot_course_sheet_validation_{month}.json"
             audit_report = f"hubspot_course_sheet_live_audit_{month}.json"
             pipeline_cmd = [
@@ -123,6 +130,8 @@ def main() -> None:
                 ga4_map_csv,
                 "--validation-report",
                 validation_report,
+                "--source-snapshot-json",
+                source_snapshot,
                 "--provisional-days",
                 str(args.provisional_days),
                 "--email-type",
@@ -158,6 +167,8 @@ def main() -> None:
                 args.email_type,
                 "--output",
                 audit_report,
+                "--source-snapshot-json",
+                source_snapshot,
             ]
             run_logged(audit_cmd, run_log)
             audit = read_json(Path(audit_report))
