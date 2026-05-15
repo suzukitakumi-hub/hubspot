@@ -236,7 +236,7 @@ def main() -> None:
         print("promotion=skipped")
         return
 
-    run_step("promote_live", promote_cmd, attempts=2)
+    run_step("promote_live", promote_cmd, attempts=4, retry_sleep_seconds=75)
 
 
 if __name__ == "__main__":
