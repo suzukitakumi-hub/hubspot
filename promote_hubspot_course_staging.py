@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import time
 
 from hubspot_course_sheet_guardrails import (
     COURSE_SHEET_HEADER,
@@ -16,14 +17,11 @@ from hubspot_course_sheet_guardrails import (
     REVIEW_MASTER_UNMATCHED_SHEET,
     TARGET_COURSES,
     derive_validation_report_path,
-    ensure_worksheet,
     header_matches_expected,
     load_json,
     now_jst,
-    normalize_header_row,
+    normalize_sheet_matrix,
     parse_iso_datetime,
-    read_worksheet_matrix,
-    set_worksheet_hidden,
     snapshot_sha256,
     staging_tab_title,
     write_sheet_values,
@@ -50,6 +48,16 @@ VOLATILE_PARTIAL_FIELDS = {
     "配信停止率",
 }
 HYPERLINK_EMAIL_ID_RE = re.compile(r"/details/(\d+)/performance")
+SHEETS_RETRYABLE_MARKERS = (
+    "429",
+    "500",
+    "502",
+    "503",
+    "504",
+    "Quota exceeded",
+    "Read requests per minute",
+    "Write requests per minute",
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -77,6 +85,85 @@ def parse_args() -> argparse.Namespace:
 def parse_hyperlink_email_id(formula_value: str) -> str:
     match = HYPERLINK_EMAIL_ID_RE.search(formula_value or "")
     return match.group(1) if match else ""
+
+
+def is_retryable_sheets_error(error: Exception) -> bool:
+    text = str(error)
+    return any(marker in text for marker in SHEETS_RETRYABLE_MARKERS)
+
+
+def run_sheets_call(label: str, func, attempts: int = 4, retry_sleep_seconds: int = 70):
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return func()
+        except Exception as error:
+            last_error = error
+            if not is_retryable_sheets_error(error) or attempt >= attempts:
+                raise
+            sleep_seconds = retry_sleep_seconds * attempt
+            print(
+                f"sheets_retry label={label} attempt={attempt}/{attempts} "
+                f"sleep_seconds={sleep_seconds} error={type(error).__name__}: {error}",
+                flush=True,
+            )
+            time.sleep(sleep_seconds)
+    if last_error:
+        raise last_error
+    raise RuntimeError(f"Sheets call failed without an exception: {label}")
+
+
+def quote_sheet_title(title: str) -> str:
+    return "'" + title.replace("'", "''") + "'"
+
+
+def load_worksheets_by_title(spreadsheet) -> dict:
+    worksheets = run_sheets_call("worksheets", lambda: spreadsheet.worksheets())
+    return {worksheet.title: worksheet for worksheet in worksheets}
+
+
+def require_cached_worksheet(worksheets_by_title: dict, title: str):
+    worksheet = worksheets_by_title.get(title)
+    if not worksheet:
+        raise SystemExit(f"Worksheet not found: {title}")
+    return worksheet
+
+
+def ensure_cached_worksheet(spreadsheet, worksheets_by_title: dict, title: str, rows: int, cols: int):
+    worksheet = worksheets_by_title.get(title)
+    if worksheet:
+        return worksheet
+    worksheet = run_sheets_call(
+        f"add_worksheet:{title}",
+        lambda: spreadsheet.add_worksheet(title=title, rows=rows, cols=cols),
+    )
+    worksheets_by_title[title] = worksheet
+    return worksheet
+
+
+def batch_get_matrices(spreadsheet, worksheets_by_title: dict, titles: list[str]) -> dict[str, list[list[str]]]:
+    ranges = []
+    existing_titles = []
+    for title in titles:
+        worksheet = worksheets_by_title.get(title)
+        if not worksheet:
+            continue
+        existing_titles.append(title)
+        ranges.append(f"{quote_sheet_title(title)}!A1:{COURSE_SHEET_LAST_COLUMN}{max(worksheet.row_count, 1)}")
+    if not ranges:
+        return {}
+    response = run_sheets_call(
+        "values_batch_get",
+        lambda: spreadsheet.values_batch_get(ranges, params={"valueRenderOption": "FORMULA"}),
+    )
+    value_ranges = response.get("valueRanges") or []
+    out: dict[str, list[list[str]]] = {}
+    for index, title in enumerate(existing_titles):
+        values = []
+        if index < len(value_ranges):
+            values = value_ranges[index].get("values") or []
+        out[title] = normalize_sheet_matrix(values)
+    return out
 
 
 def collect_blocked_email_ids(report: dict) -> tuple[str, set[str]]:
@@ -151,18 +238,21 @@ def load_and_validate_report(path: str, month: str, max_age_minutes: int) -> tup
     return report, mode, blocked_email_ids
 
 
-def sync_live_layout_from_cia(spreadsheet) -> None:
+def sync_live_layout_from_cia(spreadsheet, worksheets_by_title: dict) -> None:
     source_title = "CIA"
     subject_source_title = "USCPA"
-    source_ws = spreadsheet.worksheet(source_title)
+    source_ws = require_cached_worksheet(worksheets_by_title, source_title)
     source_col_count = len(COURSE_SHEET_HEADER)
 
-    metadata = spreadsheet.fetch_sheet_metadata(
-        params={
-            "ranges": [f"{source_title}!A:{COURSE_SHEET_LAST_COLUMN}", f"{subject_source_title}!B:B"],
-            "includeGridData": "true",
-            "fields": "sheets(properties(sheetId,title,gridProperties.frozenRowCount),data(columnMetadata(pixelSize)))",
-        }
+    metadata = run_sheets_call(
+        "fetch_layout_metadata",
+        lambda: spreadsheet.fetch_sheet_metadata(
+            params={
+                "ranges": [f"{source_title}!A:{COURSE_SHEET_LAST_COLUMN}", f"{subject_source_title}!B:B"],
+                "includeGridData": "true",
+                "fields": "sheets(properties(sheetId,title,gridProperties.frozenRowCount),data(columnMetadata(pixelSize)))",
+            }
+        ),
     )
     sheets = metadata.get("sheets") or []
     source_sheet = next((sheet for sheet in sheets if (sheet.get("properties") or {}).get("title") == source_title), {})
@@ -184,7 +274,7 @@ def sync_live_layout_from_cia(spreadsheet) -> None:
 
     requests = []
     for title in TARGET_COURSES:
-        target_ws = spreadsheet.worksheet(title)
+        target_ws = require_cached_worksheet(worksheets_by_title, title)
         if title != source_title:
             requests.append(
                 {
@@ -321,17 +411,15 @@ def sync_live_layout_from_cia(spreadsheet) -> None:
             )
 
     if requests:
-        spreadsheet.batch_update({"requests": requests})
+        run_sheets_call("sync_live_layout", lambda: spreadsheet.batch_update({"requests": requests}))
 
 
-def delete_worksheet_if_exists(spreadsheet, title: str) -> None:
-    import gspread
-
-    try:
-        worksheet = spreadsheet.worksheet(title)
-    except gspread.WorksheetNotFound:
+def delete_worksheet_if_exists(spreadsheet, worksheets_by_title: dict, title: str) -> None:
+    worksheet = worksheets_by_title.get(title)
+    if not worksheet:
         return
-    spreadsheet.del_worksheet(worksheet)
+    run_sheets_call(f"delete_worksheet:{title}", lambda: spreadsheet.del_worksheet(worksheet))
+    worksheets_by_title.pop(title, None)
 
 
 def main() -> None:
@@ -360,17 +448,18 @@ def main() -> None:
     ]
     creds = Credentials.from_service_account_file(args.service_account_json, scopes=scopes)
     gc = gspread.authorize(creds)
-    spreadsheet = gc.open_by_key(args.spreadsheet_id)
+    spreadsheet = run_sheets_call("open_by_key", lambda: gc.open_by_key(args.spreadsheet_id))
+    worksheets_by_title = load_worksheets_by_title(spreadsheet)
 
-    staging_formula_snapshot = {}
+    staging_titles = [staging_tab_title(course) for course in TARGET_COURSES]
+    staging_formula_snapshot = batch_get_matrices(spreadsheet, worksheets_by_title, staging_titles)
     for course in TARGET_COURSES:
-        worksheet = spreadsheet.worksheet(staging_tab_title(course))
-        values = read_worksheet_matrix(worksheet, value_render_option="FORMULA")
+        title = staging_tab_title(course)
+        values = staging_formula_snapshot.get(title, [])
         if not values:
-            raise SystemExit(f"Staging tab {staging_tab_title(course)} is empty. Promotion aborted.")
+            raise SystemExit(f"Staging tab {title} is empty. Promotion aborted.")
         if not header_matches_expected(values[0]):
-            raise SystemExit(f"Staging tab {staging_tab_title(course)} header mismatch. Promotion aborted.")
-        staging_formula_snapshot[staging_tab_title(course)] = values
+            raise SystemExit(f"Staging tab {title} header mismatch. Promotion aborted.")
 
     current_snapshot_hash = snapshot_sha256(staging_formula_snapshot)
     expected_snapshot_hash = str(report.get("staging_formula_snapshot_sha256", "")).strip()
@@ -383,6 +472,18 @@ def main() -> None:
     month_idx = header_index["対象月"]
     send_date_idx = header_index["送付日"]
     partial_blank_rows = 0
+    live_worksheets_by_course = {}
+    for course in TARGET_COURSES:
+        source_values = staging_formula_snapshot[staging_tab_title(course)]
+        live_worksheets_by_course[course] = ensure_cached_worksheet(
+            spreadsheet,
+            worksheets_by_title,
+            course,
+            max(200, len(source_values) + 30),
+            len(COURSE_SHEET_HEADER) + 3,
+        )
+    live_formula_snapshot = batch_get_matrices(spreadsheet, worksheets_by_title, list(TARGET_COURSES))
+    visibility_requests = []
 
     for course in TARGET_COURSES:
         values = [list(row) for row in staging_formula_snapshot[staging_tab_title(course)]]
@@ -394,8 +495,8 @@ def main() -> None:
                         partial_blank_rows += 1
                     row[cv_count_idx] = ""
                     row[cv_breakdown_idx] = ""
-        live_ws = ensure_worksheet(spreadsheet, course, max(200, len(values) + 30), len(COURSE_SHEET_HEADER) + 3)
-        existing_values = read_worksheet_matrix(live_ws, value_render_option="FORMULA")
+        live_ws = live_worksheets_by_course[course]
+        existing_values = live_formula_snapshot.get(course, [])
         preserved_rows = []
         if existing_values:
             if not header_matches_expected(existing_values[0]):
@@ -410,10 +511,42 @@ def main() -> None:
         required_rows = max(200, len(merged_rows) + 30)
         required_cols = len(COURSE_SHEET_HEADER) + 3
         if live_ws.row_count < required_rows or live_ws.col_count < required_cols:
-            live_ws.resize(rows=max(live_ws.row_count, required_rows), cols=max(live_ws.col_count, required_cols))
-        write_sheet_values(live_ws, [values[0]] + merged_rows, apply_formatting=False)
-        set_worksheet_hidden(spreadsheet, live_ws, False)
-        set_worksheet_hidden(spreadsheet, spreadsheet.worksheet(staging_tab_title(course)), True)
+            run_sheets_call(
+                f"resize:{course}",
+                lambda live_ws=live_ws: live_ws.resize(
+                    rows=max(live_ws.row_count, required_rows),
+                    cols=max(live_ws.col_count, required_cols),
+                ),
+            )
+        output_values = [values[0]] + merged_rows
+        run_sheets_call(
+            f"write_sheet_values:{course}",
+            lambda live_ws=live_ws, output_values=output_values: write_sheet_values(
+                live_ws,
+                output_values,
+                apply_formatting=False,
+            ),
+        )
+        visibility_requests.append(
+            {
+                "updateSheetProperties": {
+                    "properties": {"sheetId": live_ws.id, "hidden": False},
+                    "fields": "hidden",
+                }
+            }
+        )
+        staging_ws = require_cached_worksheet(worksheets_by_title, staging_tab_title(course))
+        visibility_requests.append(
+            {
+                "updateSheetProperties": {
+                    "properties": {"sheetId": staging_ws.id, "hidden": True},
+                    "fields": "hidden",
+                }
+            }
+        )
+
+    if visibility_requests:
+        run_sheets_call("set_visibility", lambda: spreadsheet.batch_update({"requests": visibility_requests}))
 
     for title in [
         REVIEW_HUBSPOT_ONLY_SHEET,
@@ -421,9 +554,9 @@ def main() -> None:
         staging_tab_title(REVIEW_HUBSPOT_ONLY_SHEET),
         staging_tab_title(REVIEW_MASTER_UNMATCHED_SHEET),
     ]:
-        delete_worksheet_if_exists(spreadsheet, title)
+        delete_worksheet_if_exists(spreadsheet, worksheets_by_title, title)
 
-    sync_live_layout_from_cia(spreadsheet)
+    sync_live_layout_from_cia(spreadsheet, worksheets_by_title)
 
     print(f"validation_report={os.path.abspath(report_path)}")
     print(f"promotion_mode={promotion_mode}")
