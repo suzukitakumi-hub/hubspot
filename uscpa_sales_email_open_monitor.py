@@ -29,6 +29,7 @@ SHEET_HEADERS = [
     "宛先",
     "開封数",
     "HubSpot",
+    "CRMメールURL",
     "CRMメールID",
 ]
 
@@ -415,10 +416,14 @@ def build_slack_text(contact: dict[str, Any], email_obj: dict[str, Any], mention
     cprops = contact.get("properties", {})
     eprops = email_obj.get("properties", {})
     contact_id = str(contact.get("id"))
+    email_id = str(email_obj.get("id"))
     owner_id = str(cprops.get("sales_staff_cpa") or "")
     contact_name = f"{cprops.get('lastname') or ''} {cprops.get('firstname') or ''}".strip()
     contact_url = f"https://app.hubspot.com/contacts/{PORTAL_ID}/contact/{contact_id}"
+    email_url = f"https://app.hubspot.com/contacts/{PORTAL_ID}/record/0-49/{email_id}"
+    email_subject = eprops.get("hs_email_subject") or email_id
     linked_contact_name = f"<{contact_url}|{contact_name or contact_id}>"
+    linked_email = f"<{email_url}|{email_subject}>"
     return "\n".join(
         [
             "過去リードが再行動しました",
@@ -429,7 +434,7 @@ def build_slack_text(contact: dict[str, Any], email_obj: dict[str, Any], mention
             f"メール: {cprops.get('email') or ''}",
             f"ヨミ: {cprops.get('yomi') or ''}",
             f"前回接触: {cprops.get('notes_last_contacted') or ''}",
-            f"開封メール件名: {eprops.get('hs_email_subject') or ''}",
+            f"開封メール: {linked_email}",
             f"送信元: {eprops.get('hs_email_from_email') or ''}",
         ]
     )
@@ -488,9 +493,10 @@ def ensure_worksheet(spreadsheet, title: str):
         worksheet = spreadsheet.worksheet(title)
     except Exception:
         worksheet = spreadsheet.add_worksheet(title=title, rows=1000, cols=len(SHEET_HEADERS))
-    values = worksheet.get("A1:M1")
+    header_range = f"A1:{chr(ord('A') + len(SHEET_HEADERS) - 1)}1"
+    values = worksheet.get(header_range)
     if not values or values[0] != SHEET_HEADERS:
-        worksheet.update("A1:M1", [SHEET_HEADERS])
+        worksheet.update(header_range, [SHEET_HEADERS])
         worksheet.freeze(rows=1)
     return worksheet
 
@@ -513,6 +519,8 @@ def append_sheet_row(
     owner_name = CPA_OWNER_NAMES.get(owner_id, owner_id or "担当未設定")
     contact_name = f"{cprops.get('lastname') or ''} {cprops.get('firstname') or ''}".strip()
     contact_url = f"https://app.hubspot.com/contacts/{PORTAL_ID}/contact/{contact_id}"
+    email_id = str(email_obj.get("id"))
+    email_url = f"https://app.hubspot.com/contacts/{PORTAL_ID}/record/0-49/{email_id}"
     worksheet = ensure_worksheet(spreadsheet, normalize_sheet_title(owner_name.replace(" ", "")))
     row = [
         notify_time.astimezone().strftime("%Y/%m/%d %H:%M:%S"),
@@ -527,7 +535,8 @@ def append_sheet_row(
         eprops.get("hs_email_to_email") or "",
         eprops.get("hs_email_open_count") or "",
         contact_url,
-        str(email_obj.get("id")),
+        f'=HYPERLINK("{email_url}","{email_id}")',
+        email_id,
     ]
     worksheet.append_row(row, value_input_option="USER_ENTERED")
     return f"sheet appended:{worksheet.title}"
