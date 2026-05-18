@@ -1,4 +1,4 @@
-name: USCPA sales email open monitor
+name: USCPA reactivation monitor
 
 on:
   schedule:
@@ -21,7 +21,7 @@ on:
           - hubspot
           - both
       lookback_hours:
-        description: "HubSpot email search lookback hours"
+        description: "HubSpot search lookback hours"
         required: true
         default: "6"
         type: string

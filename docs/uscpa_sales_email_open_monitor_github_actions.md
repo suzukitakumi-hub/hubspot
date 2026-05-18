@@ -1,20 +1,22 @@
-# USCPA CRM営業メール開封通知 GitHub Actions移行
+# USCPA過去リード再行動通知 GitHub Actions移行
 
 ## 目的
 
-Windowsスケジューラー依存を外し、GitHub Actionsで `uscpa_sales_email_open_monitor.py` を30分ごとに実行する。
+Windowsスケジューラー依存を外し、GitHub Actionsで `uscpa_sales_email_open_monitor.py` を15分ごとに実行する。
 
 ## 実行内容
 
 - HubSpot CRMメール活動から開封済みメールを検索
 - `noreply` 送信元を除外
 - `info@abitus.co.jp` またはCPA営業担当メールから送信されたメールのみ対象
+- HubSpotコンタクトの直近Web閲覧から `uscpa` を含むページ閲覧を検索
 - 過去リードリスト `6567` のコンタクトのみ対象
 - `sales_staff_cpa` が対象CPA営業担当の場合のみ通知
 - Slack Botで担当者をメンション
 - Slack通知の開封メール件名にはHubSpotのCRMメール活動レコードURLを付ける
+- Slack通知のWeb閲覧には直近閲覧ページURLを付ける
 - Google Sheetsへ担当者別タブで追記
-- 同一CRMメールIDの二重通知と、同一コンタクト10日以内の再通知を抑止
+- 同一通知キーの二重通知と、同一コンタクト10日以内の再通知を抑止
 
 ## GitHub Secrets
 
