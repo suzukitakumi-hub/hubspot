@@ -32,6 +32,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--email-type", default=os.environ.get("HUBSPOT_EMAIL_TYPE", "BATCH_EMAIL"))
     parser.add_argument("--log-dir", default=os.environ.get("HUBSPOT_COURSE_UPDATE_LOG_DIR", "logs/course_sheet_updates"))
     parser.add_argument("--skip-promote", action="store_true", default=False)
+    parser.add_argument(
+        "--post-promote-cooldown-seconds",
+        type=int,
+        default=int(os.environ.get("HUBSPOT_COURSE_POST_PROMOTE_COOLDOWN_SECONDS", "70")),
+        help="Cooldown before live audit after promotion to avoid Sheets API per-minute quotas.",
+    )
     return parser.parse_args()
 
 
@@ -70,18 +76,36 @@ def default_months(include_previous_until_day: int) -> list[str]:
     return months
 
 
-def run_logged(command: list[str], log_file: Path) -> None:
-    started = time.perf_counter()
+def run_logged(command: list[str], log_file: Path, attempts: int = 1, retry_sleep_seconds: int = 90) -> None:
+    last_returncode = 0
+    for attempt in range(1, attempts + 1):
+        started = time.perf_counter()
+        with log_file.open("a", encoding="utf-8") as handle:
+            handle.write("\n$ " + " ".join(command) + "\n")
+            handle.write(f"command_attempt={attempt}/{attempts}\n")
+            handle.write(f"command_started_at={dt.datetime.now(JST).isoformat()}\n")
+            handle.flush()
+            completed = subprocess.run(command, stdout=handle, stderr=subprocess.STDOUT, check=False)
+            elapsed = time.perf_counter() - started
+            handle.write(f"command_finished_at={dt.datetime.now(JST).isoformat()}\n")
+            handle.write(f"command_returncode={completed.returncode} duration_seconds={elapsed:.3f}\n")
+        last_returncode = completed.returncode
+        if completed.returncode == 0:
+            return
+        if attempt < attempts:
+            sleep_seconds = retry_sleep_seconds * attempt
+            with log_file.open("a", encoding="utf-8") as handle:
+                handle.write(f"retrying_command attempt={attempt}/{attempts} sleep_seconds={sleep_seconds} returncode={completed.returncode}\n")
+            time.sleep(sleep_seconds)
+    raise subprocess.CalledProcessError(last_returncode, command)
+
+
+def cooldown(label: str, seconds: int, log_file: Path) -> None:
+    if seconds <= 0:
+        return
     with log_file.open("a", encoding="utf-8") as handle:
-        handle.write("\n$ " + " ".join(command) + "\n")
-        handle.write(f"command_started_at={dt.datetime.now(JST).isoformat()}\n")
-        handle.flush()
-        completed = subprocess.run(command, stdout=handle, stderr=subprocess.STDOUT, check=False)
-        elapsed = time.perf_counter() - started
-        handle.write(f"command_finished_at={dt.datetime.now(JST).isoformat()}\n")
-        handle.write(f"command_returncode={completed.returncode} duration_seconds={elapsed:.3f}\n")
-    if completed.returncode != 0:
-        raise subprocess.CalledProcessError(completed.returncode, command)
+        handle.write(f"scheduled_cooldown label={label} sleep_seconds={seconds}\n")
+    time.sleep(seconds)
 
 
 def read_json(path: Path) -> dict:
@@ -139,7 +163,7 @@ def main() -> None:
             ]
             if args.skip_promote:
                 pipeline_cmd.append("--skip-promote")
-            run_logged(pipeline_cmd, run_log)
+            run_logged(pipeline_cmd, run_log, attempts=2, retry_sleep_seconds=120)
 
             if args.skip_promote:
                 summary["results"].append(
@@ -170,7 +194,8 @@ def main() -> None:
                 "--source-snapshot-json",
                 source_snapshot,
             ]
-            run_logged(audit_cmd, run_log)
+            cooldown("before_live_audit", args.post_promote_cooldown_seconds, run_log)
+            run_logged(audit_cmd, run_log, attempts=3, retry_sleep_seconds=90)
             audit = read_json(Path(audit_report))
             issue_count = len(audit.get("issues", []) or [])
             summary["results"].append(
