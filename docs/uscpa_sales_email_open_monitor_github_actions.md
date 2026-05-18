@@ -26,7 +26,18 @@ Windowsスケジューラー依存を外し、GitHub Actionsで `uscpa_sales_ema
 - `USCPA_SHEET_SPREADSHEET_ID`
 - `GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT`
 
+一時的にGitHub Actionsの成功/失敗メールを送る場合は、以下も設定する。
+
+- `SMTP_HOST`
+- `SMTP_PORT`
+- `SMTP_USERNAME`
+- `SMTP_PASSWORD`
+- `SMTP_FROM`
+
 `GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT` はサービスアカウントJSONファイルの中身全体を入れる。
+
+メール通知を有効化する場合は、リポジトリ変数 `USCPA_RUN_EMAIL_NOTIFY` を `true` にする。
+現在のワークフローでは検証用に `2026-05-19T15:00:00Z` 以降は送らない。
 
 ## ワークフロー
 
