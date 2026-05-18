@@ -66,6 +66,12 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Path for the reusable source snapshot JSON.",
     )
+    parser.add_argument(
+        "--sheets-cooldown-seconds",
+        type=int,
+        default=int(os.environ.get("HUBSPOT_COURSE_SHEETS_COOLDOWN_SECONDS", "70")),
+        help="Cooldown between Sheets-heavy steps to avoid per-minute Sheets API quotas.",
+    )
     return parser.parse_args()
 
 def redact_command(command: list[str]) -> str:
@@ -107,6 +113,13 @@ def run_step(
             print(f"retrying_step={name} sleep_seconds={sleep_seconds} returncode={completed.returncode}")
             time.sleep(sleep_seconds)
     raise subprocess.CalledProcessError(last_returncode, command)
+
+
+def sheets_cooldown(label: str, seconds: int) -> None:
+    if seconds <= 0:
+        return
+    print(f"sheets_cooldown label={label} sleep_seconds={seconds}", flush=True)
+    time.sleep(seconds)
 
 
 def main() -> None:
@@ -225,6 +238,7 @@ def main() -> None:
 
     run_step("build_source_snapshot", source_snapshot_cmd, attempts=3)
     run_step("write_staging", writer_cmd, attempts=3)
+    sheets_cooldown("after_write_staging", args.sheets_cooldown_seconds)
     validate_returncode = run_step("validate_staging", validator_cmd, allowed_exit_codes=(0, 1), attempts=3)
     if not os.path.exists(validation_report_path):
         raise SystemExit(
@@ -236,6 +250,7 @@ def main() -> None:
         print("promotion=skipped")
         return
 
+    sheets_cooldown("before_promote_live", args.sheets_cooldown_seconds)
     run_step("promote_live", promote_cmd, attempts=4, retry_sleep_seconds=75)
 
 
