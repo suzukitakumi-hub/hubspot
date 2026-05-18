@@ -5,9 +5,8 @@ import argparse
 import csv
 import json
 import os
-import time
 from collections import Counter, defaultdict
-from typing import Callable, Dict, List, Tuple, TypeVar
+from typing import Dict, List, Tuple
 
 from hubspot_course_sheet_guardrails import (
     COURSE_SHEET_HEADER,
@@ -17,10 +16,13 @@ from hubspot_course_sheet_guardrails import (
     DEFAULT_SERVICE_ACCOUNT_JSON,
     DEFAULT_SPREADSHEET_ID,
     TARGET_COURSES,
+    batch_get_sheet_matrices,
     derive_ga4_map_manifest_path,
     header_matches_expected,
+    load_worksheets_by_title,
     now_jst_iso,
     normalize_header_row,
+    sheets_call,
     strip_literal_prefix,
     write_json,
 )
@@ -43,35 +45,6 @@ VOLATILE_FIELD_NAMES = {
     "クリックスルー率",
     "配信停止率",
 }
-
-T = TypeVar("T")
-
-
-def retry_sheet_read(label: str, fn: Callable[[], T], attempts: int = 6) -> T:
-    last_error: Exception | None = None
-    for attempt in range(1, attempts + 1):
-        try:
-            return fn()
-        except Exception as exc:
-            last_error = exc
-            message = str(exc)
-            retryable = (
-                "[429]" in message
-                or "Quota exceeded" in message
-                or "Read requests per minute" in message
-                or "[500]" in message
-                or "[502]" in message
-                or "[503]" in message
-                or "[504]" in message
-            )
-            if not retryable or attempt == attempts:
-                raise
-            sleep_seconds = min(120, 10 * (2 ** (attempt - 1)))
-            print(f"retry_sheet_read={label} attempt={attempt}/{attempts} sleep_seconds={sleep_seconds} error={message}")
-            time.sleep(sleep_seconds)
-    assert last_error is not None
-    raise last_error
-
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Audit the live HubSpot course sheet against HubSpot and GA4 source data.")
@@ -246,7 +219,15 @@ def main() -> None:
     ]
     creds = Credentials.from_service_account_file(args.service_account_json, scopes=scopes)
     gc = gspread.authorize(creds)
-    spreadsheet = gc.open_by_key(args.spreadsheet_id)
+    spreadsheet = sheets_call("audit.open_by_key", lambda: gc.open_by_key(args.spreadsheet_id))
+    worksheets_by_title = load_worksheets_by_title(spreadsheet)
+    display_snapshots = batch_get_sheet_matrices(spreadsheet, worksheets_by_title, TARGET_COURSES)
+    formula_snapshots = batch_get_sheet_matrices(
+        spreadsheet,
+        worksheets_by_title,
+        TARGET_COURSES,
+        value_render_option="FORMULA",
+    )
 
     issues: List[dict] = []
     issue_counter: Counter[str] = Counter()
@@ -258,8 +239,7 @@ def main() -> None:
     checked_rows = 0
 
     for course in TARGET_COURSES:
-        worksheet = retry_sheet_read(f"{course}.worksheet", lambda course=course: spreadsheet.worksheet(course))
-        values = retry_sheet_read(f"{course}.values", worksheet.get_all_values)
+        values = display_snapshots.get(course, [])
         if not values:
             issue = {"code": "empty_live_tab", "course": course, "message": "Live tab is empty."}
             issues.append(issue)
@@ -281,13 +261,7 @@ def main() -> None:
             continue
 
         header_index = {name: idx for idx, name in enumerate(normalize_header_row(header))}
-        formula_rows = retry_sheet_read(
-            f"{course}.formulas",
-            lambda worksheet=worksheet: worksheet.get(
-                f"A1:{COURSE_SHEET_LAST_COLUMN}{max(worksheet.row_count, 1)}",
-                value_render_option="FORMULA",
-            ),
-        )
+        formula_rows = formula_snapshots.get(course, [])
         row_count = max(len(values), len(formula_rows))
         per_course_rows[course] = 0
         live_email_ids = []
