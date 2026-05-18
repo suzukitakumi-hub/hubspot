@@ -4,8 +4,10 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import os
+import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List, TypeVar
 
 
 JST = dt.timezone(dt.timedelta(hours=9))
@@ -71,6 +73,93 @@ STAGING_PREFIX = "__stg__"
 DEFAULT_GA4_MAP_MAX_AGE_MINUTES = 180
 DEFAULT_VALIDATION_REPORT_MAX_AGE_MINUTES = 30
 DEFAULT_PROVISIONAL_DAYS = 12
+DEFAULT_SHEETS_RETRY_ATTEMPTS = 6
+DEFAULT_SHEETS_RETRY_SLEEP_SECONDS = 70
+SHEETS_RETRYABLE_MARKERS = (
+    "429",
+    "500",
+    "502",
+    "503",
+    "504",
+    "Quota exceeded",
+    "Rate Limit Exceeded",
+    "Read requests per minute",
+    "Write requests per minute",
+    "internal error",
+    "backendError",
+)
+
+T = TypeVar("T")
+_LAST_SHEETS_CALL_AT = 0.0
+
+
+def env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name, "")
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "")
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def is_retryable_sheets_error(error: Exception) -> bool:
+    text = str(error)
+    return any(marker in text for marker in SHEETS_RETRYABLE_MARKERS)
+
+
+def throttle_sheets_call() -> None:
+    interval = env_float("HUBSPOT_COURSE_SHEETS_MIN_INTERVAL_SECONDS", 1.2)
+    if interval <= 0:
+        return
+    global _LAST_SHEETS_CALL_AT
+    now = time.monotonic()
+    wait_seconds = (_LAST_SHEETS_CALL_AT + interval) - now
+    if wait_seconds > 0:
+        time.sleep(wait_seconds)
+    _LAST_SHEETS_CALL_AT = time.monotonic()
+
+
+def sheets_call(
+    label: str,
+    func: Callable[[], T],
+    attempts: int | None = None,
+    retry_sleep_seconds: int | None = None,
+) -> T:
+    max_attempts = attempts or env_int("HUBSPOT_COURSE_SHEETS_RETRY_ATTEMPTS", DEFAULT_SHEETS_RETRY_ATTEMPTS)
+    base_sleep = retry_sleep_seconds or env_int(
+        "HUBSPOT_COURSE_SHEETS_RETRY_SLEEP_SECONDS",
+        DEFAULT_SHEETS_RETRY_SLEEP_SECONDS,
+    )
+    last_error: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        throttle_sheets_call()
+        try:
+            return func()
+        except Exception as error:
+            last_error = error
+            if not is_retryable_sheets_error(error) or attempt >= max_attempts:
+                raise
+            sleep_seconds = base_sleep * attempt
+            print(
+                f"sheets_retry label={label} attempt={attempt}/{max_attempts} "
+                f"sleep_seconds={sleep_seconds} error={type(error).__name__}: {error}",
+                flush=True,
+            )
+            time.sleep(sleep_seconds)
+    if last_error:
+        raise last_error
+    raise RuntimeError(f"Sheets call failed without an exception: {label}")
 
 
 def now_jst() -> dt.datetime:
@@ -145,6 +234,10 @@ def column_letter(index_1_based: int) -> str:
 COURSE_SHEET_LAST_COLUMN = column_letter(COURSE_SHEET_COLS)
 
 
+def quote_sheet_title(title: str) -> str:
+    return "'" + title.replace("'", "''") + "'"
+
+
 def normalize_sheet_matrix(values: List[List[Any]], width: int = COURSE_SHEET_COLS) -> List[List[str]]:
     normalized: List[List[str]] = []
     for row in values:
@@ -173,7 +266,7 @@ def read_worksheet_matrix(worksheet, value_render_option: str | None = None) -> 
     kwargs: Dict[str, Any] = {}
     if value_render_option:
         kwargs["value_render_option"] = value_render_option
-    values = worksheet.get(range_name, **kwargs)
+    values = sheets_call(f"{worksheet.title}.get:{value_render_option or 'display'}", lambda: worksheet.get(range_name, **kwargs))
     return normalize_sheet_matrix(values)
 
 
@@ -186,23 +279,26 @@ def ensure_worksheet(spreadsheet, title: str, rows: int, cols: int):
     import gspread
 
     try:
-        return spreadsheet.worksheet(title)
+        return sheets_call(f"worksheet:{title}", lambda: spreadsheet.worksheet(title))
     except gspread.WorksheetNotFound:
-        return spreadsheet.add_worksheet(title=title, rows=rows, cols=cols)
+        return sheets_call(f"add_worksheet:{title}", lambda: spreadsheet.add_worksheet(title=title, rows=rows, cols=cols))
 
 
 def set_worksheet_hidden(spreadsheet, worksheet, hidden: bool) -> None:
-    spreadsheet.batch_update(
-        {
-            "requests": [
-                {
-                    "updateSheetProperties": {
-                        "properties": {"sheetId": worksheet.id, "hidden": hidden},
-                        "fields": "hidden",
+    sheets_call(
+        f"set_hidden:{worksheet.title}:{hidden}",
+        lambda: spreadsheet.batch_update(
+            {
+                "requests": [
+                    {
+                        "updateSheetProperties": {
+                            "properties": {"sheetId": worksheet.id, "hidden": hidden},
+                            "fields": "hidden",
+                        }
                     }
-                }
-            ]
-        }
+                ]
+            }
+        ),
     )
 
 
@@ -210,103 +306,157 @@ def write_sheet_values(worksheet, values, apply_formatting: bool = True) -> None
     materialized_values = [list(row) for row in values]
     if materialized_values and normalize_header_row(materialized_values[0]) == COURSE_SHEET_HEADER:
         materialized_values[0] = list(COURSE_SHEET_DISPLAY_HEADER)
-    worksheet.clear()
-    worksheet.update(materialized_values, value_input_option="USER_ENTERED")
+    sheets_call(f"{worksheet.title}.clear", worksheet.clear)
+    sheets_call(
+        f"{worksheet.title}.update",
+        lambda: worksheet.update(materialized_values, value_input_option="USER_ENTERED"),
+    )
     if not apply_formatting:
         return
-    worksheet.freeze(rows=1)
-    worksheet.batch_format(
-        [
-            {"range": "1:1", "format": {"wrapStrategy": "WRAP", "verticalAlignment": "MIDDLE"}},
-            {
-                "range": f"A2:{COURSE_SHEET_LAST_COLUMN}",
-                "format": {"horizontalAlignment": "RIGHT", "verticalAlignment": "MIDDLE"},
-            },
-            {
-                "range": f"{column_letter(COURSE_SHEET_INDEX['送付リスト'] + 1)}2:{column_letter(COURSE_SHEET_INDEX['送付リスト'] + 1)}",
-                "format": {"wrapStrategy": "CLIP"},
-            },
-            {"range": "A:C", "format": {"numberFormat": {"type": "TEXT"}}},
-            {"range": "D:H", "format": {"numberFormat": {"type": "NUMBER", "pattern": "0"}}},
-            {"range": "I:J", "format": {"numberFormat": {"type": "TEXT"}}},
-            {"range": "K:K", "format": {"numberFormat": {"type": "PERCENT", "pattern": "0.00%"}}},
-            {"range": "L:M", "format": {"numberFormat": {"type": "TEXT"}}},
-            {"range": "N:N", "format": {"numberFormat": {"type": "NUMBER", "pattern": "0"}}},
-            {"range": f"O:{COURSE_SHEET_LAST_COLUMN}", "format": {"numberFormat": {"type": "TEXT"}}},
-        ]
-    )
-    worksheet.spreadsheet.batch_update(
-        {
-            "requests": [
+    sheets_call(f"{worksheet.title}.freeze", lambda: worksheet.freeze(rows=1))
+    sheets_call(
+        f"{worksheet.title}.batch_format",
+        lambda: worksheet.batch_format(
+            [
+                {"range": "1:1", "format": {"wrapStrategy": "WRAP", "verticalAlignment": "MIDDLE"}},
                 {
-                    "updateDimensionProperties": {
-                        "range": {
-                            "sheetId": worksheet.id,
-                            "dimension": "ROWS",
-                            "startIndex": 1,
-                            "endIndex": worksheet.row_count,
-                        },
-                        "properties": {"pixelSize": 21},
-                        "fields": "pixelSize",
-                    }
+                    "range": f"A2:{COURSE_SHEET_LAST_COLUMN}",
+                    "format": {"horizontalAlignment": "RIGHT", "verticalAlignment": "MIDDLE"},
                 },
                 {
-                    "updateDimensionProperties": {
-                        "range": {
-                            "sheetId": worksheet.id,
-                            "dimension": "ROWS",
-                            "startIndex": 0,
-                            "endIndex": 1,
-                        },
-                        "properties": {"pixelSize": 42},
-                        "fields": "pixelSize",
-                    }
-                }
+                    "range": f"{column_letter(COURSE_SHEET_INDEX['送付リスト'] + 1)}2:{column_letter(COURSE_SHEET_INDEX['送付リスト'] + 1)}",
+                    "format": {"wrapStrategy": "CLIP"},
+                },
+                {"range": "A:C", "format": {"numberFormat": {"type": "TEXT"}}},
+                {"range": "D:H", "format": {"numberFormat": {"type": "NUMBER", "pattern": "0"}}},
+                {"range": "I:J", "format": {"numberFormat": {"type": "TEXT"}}},
+                {"range": "K:K", "format": {"numberFormat": {"type": "PERCENT", "pattern": "0.00%"}}},
+                {"range": "L:M", "format": {"numberFormat": {"type": "TEXT"}}},
+                {"range": "N:N", "format": {"numberFormat": {"type": "NUMBER", "pattern": "0"}}},
+                {"range": f"O:{COURSE_SHEET_LAST_COLUMN}", "format": {"numberFormat": {"type": "TEXT"}}},
             ]
-        }
+        ),
+    )
+    sheets_call(
+        f"{worksheet.title}.row_heights",
+        lambda: worksheet.spreadsheet.batch_update(
+            {
+                "requests": [
+                    {
+                        "updateDimensionProperties": {
+                            "range": {
+                                "sheetId": worksheet.id,
+                                "dimension": "ROWS",
+                                "startIndex": 1,
+                                "endIndex": worksheet.row_count,
+                            },
+                            "properties": {"pixelSize": 21},
+                            "fields": "pixelSize",
+                        },
+                    },
+                    {
+                        "updateDimensionProperties": {
+                            "range": {
+                                "sheetId": worksheet.id,
+                                "dimension": "ROWS",
+                                "startIndex": 0,
+                                "endIndex": 1,
+                            },
+                            "properties": {"pixelSize": 42},
+                            "fields": "pixelSize",
+                        },
+                    },
+                ]
+            }
+        ),
     )
 
 
 def write_simple_sheet_values(worksheet, header: List[str], rows: List[List[Any]], apply_formatting: bool = True) -> None:
     values = [list(header)] + [list(row) for row in rows]
-    worksheet.clear()
-    worksheet.update(values, value_input_option="USER_ENTERED")
+    sheets_call(f"{worksheet.title}.clear", worksheet.clear)
+    sheets_call(f"{worksheet.title}.update", lambda: worksheet.update(values, value_input_option="USER_ENTERED"))
     if not apply_formatting:
         return
-    worksheet.freeze(rows=1)
-    worksheet.batch_format(
-        [
-            {"range": "1:1", "format": {"wrapStrategy": "WRAP", "verticalAlignment": "MIDDLE"}},
-            {"range": "A2:Z", "format": {"horizontalAlignment": "RIGHT", "verticalAlignment": "MIDDLE"}},
-        ]
-    )
-    worksheet.spreadsheet.batch_update(
-        {
-            "requests": [
-                {
-                    "updateDimensionProperties": {
-                        "range": {
-                            "sheetId": worksheet.id,
-                            "dimension": "ROWS",
-                            "startIndex": 1,
-                            "endIndex": worksheet.row_count,
-                        },
-                        "properties": {"pixelSize": 21},
-                        "fields": "pixelSize",
-                    }
-                },
-                {
-                    "updateDimensionProperties": {
-                        "range": {
-                            "sheetId": worksheet.id,
-                            "dimension": "ROWS",
-                            "startIndex": 0,
-                            "endIndex": 1,
-                        },
-                        "properties": {"pixelSize": 42},
-                        "fields": "pixelSize",
-                    }
-                },
+    sheets_call(f"{worksheet.title}.freeze", lambda: worksheet.freeze(rows=1))
+    sheets_call(
+        f"{worksheet.title}.batch_format",
+        lambda: worksheet.batch_format(
+            [
+                {"range": "1:1", "format": {"wrapStrategy": "WRAP", "verticalAlignment": "MIDDLE"}},
+                {"range": "A2:Z", "format": {"horizontalAlignment": "RIGHT", "verticalAlignment": "MIDDLE"}},
             ]
-        }
+        ),
     )
+    sheets_call(
+        f"{worksheet.title}.row_heights",
+        lambda: worksheet.spreadsheet.batch_update(
+            {
+                "requests": [
+                    {
+                        "updateDimensionProperties": {
+                            "range": {
+                                "sheetId": worksheet.id,
+                                "dimension": "ROWS",
+                                "startIndex": 1,
+                                "endIndex": worksheet.row_count,
+                            },
+                            "properties": {"pixelSize": 21},
+                            "fields": "pixelSize",
+                        },
+                    },
+                    {
+                        "updateDimensionProperties": {
+                            "range": {
+                                "sheetId": worksheet.id,
+                                "dimension": "ROWS",
+                                "startIndex": 0,
+                                "endIndex": 1,
+                            },
+                            "properties": {"pixelSize": 42},
+                            "fields": "pixelSize",
+                        },
+                    },
+                ]
+            }
+        ),
+    )
+
+
+def load_worksheets_by_title(spreadsheet) -> Dict[str, Any]:
+    worksheets = sheets_call("worksheets", lambda: spreadsheet.worksheets())
+    return {worksheet.title: worksheet for worksheet in worksheets}
+
+
+def batch_get_sheet_matrices(
+    spreadsheet,
+    worksheets_by_title: Dict[str, Any],
+    titles: List[str],
+    value_render_option: str | None = None,
+    width: int = COURSE_SHEET_COLS,
+) -> Dict[str, List[List[str]]]:
+    ranges: List[str] = []
+    existing_titles: List[str] = []
+    for title in titles:
+        worksheet = worksheets_by_title.get(title)
+        if not worksheet:
+            continue
+        existing_titles.append(title)
+        ranges.append(f"{quote_sheet_title(title)}!A1:{COURSE_SHEET_LAST_COLUMN}{max(worksheet.row_count, 1)}")
+    if not ranges:
+        return {}
+    params: Dict[str, Any] = {}
+    if value_render_option:
+        params["valueRenderOption"] = value_render_option
+    response = sheets_call(
+        f"values_batch_get:{value_render_option or 'display'}",
+        lambda: spreadsheet.values_batch_get(ranges, params=params),
+    )
+    value_ranges = response.get("valueRanges") or []
+    out: Dict[str, List[List[str]]] = {}
+    for index, title in enumerate(existing_titles):
+        values = []
+        if index < len(value_ranges):
+            values = value_ranges[index].get("values") or []
+        out[title] = normalize_sheet_matrix(values, width=width)
+    return out
