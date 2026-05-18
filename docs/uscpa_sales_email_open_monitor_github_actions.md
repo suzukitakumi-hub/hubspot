@@ -12,6 +12,7 @@ Windowsスケジューラー依存を外し、GitHub Actionsで `uscpa_sales_ema
 - 過去リードリスト `6567` のコンタクトのみ対象
 - `sales_staff_cpa` が対象CPA営業担当の場合のみ通知
 - Slack Botで担当者をメンション
+- Slack通知の開封メール件名にはHubSpotのCRMメール活動レコードURLを付ける
 - Google Sheetsへ担当者別タブで追記
 - 同一CRMメールIDの二重通知と、同一コンタクト10日以内の再通知を抑止
 
