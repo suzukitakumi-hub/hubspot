@@ -1,0 +1,113 @@
+name: USCPA sales email open monitor
+
+on:
+  schedule:
+    # Every 30 minutes, offset from the top of the hour to reduce schedule delays.
+    - cron: "7,37 * * * *"
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Actually update HubSpot / post Slack / append Sheets"
+        required: true
+        default: false
+        type: boolean
+      delivery:
+        description: "Notification delivery mode"
+        required: true
+        default: slack
+        type: choice
+        options:
+          - slack
+          - hubspot
+          - both
+      lookback_hours:
+        description: "HubSpot email search lookback hours"
+        required: true
+        default: "6"
+        type: string
+      limit_per_sender:
+        description: "Max CRM email activities per allowed sender"
+        required: true
+        default: "200"
+        type: string
+      max_updates:
+        description: "Safety cap for apply runs. 0 means unlimited."
+        required: true
+        default: "0"
+        type: string
+      sheet_output:
+        description: "Append notification rows to Google Sheets"
+        required: true
+        default: true
+        type: boolean
+
+concurrency:
+  group: uscpa-sales-email-open-monitor
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      HUBSPOT_PAT: ${{ secrets.HUBSPOT_PAT }}
+      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+      USCPA_SLACK_CHANNEL_ID: ${{ secrets.USCPA_SLACK_CHANNEL_ID }}
+      USCPA_SHEET_SPREADSHEET_ID: ${{ secrets.USCPA_SHEET_SPREADSHEET_ID }}
+      LOOKBACK_HOURS: ${{ inputs.lookback_hours || '6' }}
+      LIMIT_PER_SENDER: ${{ inputs.limit_per_sender || '200' }}
+      MAX_UPDATES: ${{ inputs.max_updates || '0' }}
+      DELIVERY: ${{ inputs.delivery || 'slack' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: requirements-hubspot-course-update.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-hubspot-course-update.txt
+
+      - name: Write Google service account JSON
+        if: ${{ github.event_name == 'schedule' || inputs.sheet_output == true }}
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT }}
+        run: |
+          test -n "$GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT"
+          printf '%s' "$GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT" > "$RUNNER_TEMP/google-service-account.json"
+          chmod 600 "$RUNNER_TEMP/google-service-account.json"
+
+      - name: Run monitor
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ runner.temp }}/google-service-account.json
+        run: |
+          args=(
+            --lookback-hours "$LOOKBACK_HOURS"
+            --limit-per-sender "$LIMIT_PER_SENDER"
+            --delivery "$DELIVERY"
+            --slack-channel-id "$USCPA_SLACK_CHANNEL_ID"
+            --max-updates "$MAX_UPDATES"
+          )
+
+          if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ inputs.apply }}" = "true" ]; then
+            args+=(--apply)
+          fi
+
+          if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ inputs.sheet_output }}" = "true" ]; then
+            args+=(--sheet-output)
+          fi
+
+          python uscpa_sales_email_open_monitor.py "${args[@]}"
+
+      - name: Upload monitor details
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: uscpa-sales-email-open-monitor-output
+          path: outputs/uscpa_sales_email_open_monitor_*.json
+          if-no-files-found: ignore
