@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -6,6 +7,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 
@@ -24,13 +26,13 @@ SHEET_HEADERS = [
     "ヨミ",
     "前回接触",
     "行動",
-    "開封メール件名",
-    "送信元",
+    "詳細",
+    "送信元/ページURL",
     "宛先",
     "開封数",
     "HubSpot",
-    "CRMメールURL",
-    "CRMメールID",
+    "関連URL",
+    "通知ID",
 ]
 
 ALLOWED_SENDERS = {
@@ -87,6 +89,9 @@ CONTACT_PROPS = [
     "notes_last_contacted",
     "uscpa_reactivation_last_email_id",
     "uscpa_reactivation_last_notified_at",
+    "hs_analytics_last_url",
+    "hs_analytics_last_timestamp",
+    "hs_analytics_last_visit_timestamp",
 ]
 
 EMAIL_PROPS = [
@@ -136,10 +141,11 @@ class HubSpot:
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="USCPA過去リード向けCRM営業メール開封Slack通知のHubSpotプロパティ更新処理"
+        description="USCPA過去リード向けCRM営業メール開封/Web閲覧Slack通知処理"
     )
     parser.add_argument("--lookback-hours", type=int, default=48)
     parser.add_argument("--limit-per-sender", type=int, default=100)
+    parser.add_argument("--limit-web-contacts", type=int, default=500)
     parser.add_argument("--suppression-days", type=int, default=10)
     parser.add_argument("--apply", action="store_true", help="条件一致コンタクトを実際に更新する")
     parser.add_argument(
@@ -170,6 +176,11 @@ def parse_args():
         action="store_true",
         default=os.environ.get("USCPA_SHEET_OUTPUT", "").lower() in {"1", "true", "yes"},
         help="通知済みレコードをGoogleスプレッドシートにも追記する。",
+    )
+    parser.add_argument(
+        "--disable-web",
+        action="store_true",
+        help="Webページ閲覧通知を無効化する。既定では有効。",
     )
     parser.add_argument(
         "--sheet-spreadsheet-id",
@@ -262,6 +273,39 @@ def search_open_emails(client: HubSpot, sender: str, since_ms: str, limit: int) 
             return results
 
 
+def search_recent_web_contacts(client: HubSpot, since_ms: str, limit: int) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    after = None
+    while True:
+        payload: dict[str, Any] = {
+            "filterGroups": [
+                {
+                    "filters": [
+                        {
+                            "propertyName": "hs_analytics_last_timestamp",
+                            "operator": "GTE",
+                            "value": since_ms,
+                        }
+                    ]
+                }
+            ],
+            "properties": CONTACT_PROPS,
+            "limit": min(100, max(1, limit - len(results))),
+            "sorts": [
+                {"propertyName": "hs_analytics_last_timestamp", "direction": "DESCENDING"}
+            ],
+        }
+        if after:
+            payload["after"] = after
+        data = client.request("POST", "/crm/v3/objects/contacts/search", json=payload)
+        results.extend(data.get("results", []))
+        if len(results) >= limit:
+            return results[:limit]
+        after = data.get("paging", {}).get("next", {}).get("after")
+        if not after:
+            return results
+
+
 def batch_email_contact_associations(client: HubSpot, email_ids: list[str]) -> dict[str, list[str]]:
     out: dict[str, list[str]] = {}
     for start in range(0, len(email_ids), 100):
@@ -328,9 +372,44 @@ def should_skip_email(email_obj: dict[str, Any]) -> str | None:
     return None
 
 
+def is_uscpa_page(url: str | None) -> bool:
+    if not url:
+        return False
+    return "uscpa" in url.lower()
+
+
+def web_notification_key(contact: dict[str, Any]) -> str:
+    props = contact.get("properties", {})
+    timestamp = props.get("hs_analytics_last_timestamp") or props.get(
+        "hs_analytics_last_visit_timestamp"
+    ) or ""
+    url = props.get("hs_analytics_last_url") or ""
+    digest = hashlib.sha256(f"{timestamp}|{url}".encode("utf-8")).hexdigest()[:16]
+    return f"web:{timestamp}:{digest}"
+
+
+def shorten_url_label(url: str) -> str:
+    if not url:
+        return ""
+    parsed = urlparse(url)
+    if not parsed.netloc:
+        return url
+    return f"{parsed.netloc}{parsed.path}" or url
+
+
+def should_skip_web_contact(contact: dict[str, Any]) -> str | None:
+    props = contact.get("properties", {})
+    url = props.get("hs_analytics_last_url")
+    if not url:
+        return "web page url missing"
+    if not is_uscpa_page(url):
+        return "not uscpa page"
+    return None
+
+
 def should_notify_contact(
     contact: dict[str, Any],
-    email_id: str,
+    notification_key: str,
     past_member_ids: set[str],
     now: datetime,
     suppression_days: int,
@@ -342,8 +421,8 @@ def should_notify_contact(
     owner_id = str(props.get("sales_staff_cpa") or "")
     if owner_id not in ALLOWED_CPA_OWNER_IDS:
         return "sales_staff_cpa not target owner"
-    if str(props.get("uscpa_reactivation_last_email_id") or "") == str(email_id):
-        return "same email already notified"
+    if str(props.get("uscpa_reactivation_last_email_id") or "") == str(notification_key):
+        return "same action already notified"
     last_notified = parse_hs_datetime(props.get("uscpa_reactivation_last_notified_at"))
     if last_notified and now - last_notified < timedelta(days=suppression_days):
         return "within suppression window"
@@ -353,29 +432,30 @@ def should_notify_contact(
 def update_contact_for_notification(
     client: HubSpot,
     contact: dict[str, Any],
-    email_obj: dict[str, Any],
+    notification_key: str,
+    action_type: str,
+    detail: str,
+    source_or_url: str,
     slack_map: dict[str, str],
     now: datetime,
     trigger_hubspot_workflow: bool,
 ):
     contact_id = str(contact["id"])
     cprops = contact.get("properties", {})
-    eprops = email_obj.get("properties", {})
     owner_id = str(cprops.get("sales_staff_cpa") or "")
-    email_id = str(email_obj["id"])
     payload = {
         "properties": {
-            "uscpa_reactivation_last_email_id": email_id,
+            "uscpa_reactivation_last_email_id": notification_key,
             "uscpa_reactivation_last_notified_at": now.isoformat().replace("+00:00", "Z"),
-            "uscpa_reactivation_last_email_subject": eprops.get("hs_email_subject") or "",
-            "uscpa_reactivation_last_email_from": eprops.get("hs_email_from_email") or "",
-            "uscpa_reactivation_last_action_type": "USCPA CRM営業メール開封",
+            "uscpa_reactivation_last_email_subject": detail,
+            "uscpa_reactivation_last_email_from": source_or_url,
+            "uscpa_reactivation_last_action_type": action_type,
             "uscpa_reactivation_slack_mention": slack_map.get(owner_id, ""),
         }
     }
     if trigger_hubspot_workflow:
         payload["properties"]["uscpa_reactivation_notification_seq"] = (
-            f"{email_id}:{int(now.timestamp())}"
+            f"{notification_key}:{int(now.timestamp())}"
         )
     return client.request("PATCH", f"/crm/v3/objects/contacts/{contact_id}", json=payload)
 
@@ -412,7 +492,7 @@ def lookup_slack_mentions_by_email(token: str, existing_map: dict[str, str]) -> 
     return slack_map
 
 
-def build_slack_text(contact: dict[str, Any], email_obj: dict[str, Any], mention: str) -> str:
+def build_email_slack_text(contact: dict[str, Any], email_obj: dict[str, Any], mention: str) -> str:
     cprops = contact.get("properties", {})
     eprops = email_obj.get("properties", {})
     contact_id = str(contact.get("id"))
@@ -440,6 +520,30 @@ def build_slack_text(contact: dict[str, Any], email_obj: dict[str, Any], mention
     )
 
 
+def build_web_slack_text(contact: dict[str, Any], mention: str) -> str:
+    cprops = contact.get("properties", {})
+    contact_id = str(contact.get("id"))
+    contact_name = f"{cprops.get('lastname') or ''} {cprops.get('firstname') or ''}".strip()
+    contact_url = f"https://app.hubspot.com/contacts/{PORTAL_ID}/contact/{contact_id}"
+    page_url = cprops.get("hs_analytics_last_url") or ""
+    linked_contact_name = f"<{contact_url}|{contact_name or contact_id}>"
+    linked_page = f"<{page_url}|{shorten_url_label(page_url)}>" if page_url else ""
+    return "\n".join(
+        [
+            "過去リードが再行動しました",
+            "",
+            f"担当者: {mention}".strip(),
+            "行動: USCPA Webページ閲覧",
+            f"顧客名: {linked_contact_name}",
+            f"メール: {cprops.get('email') or ''}",
+            f"ヨミ: {cprops.get('yomi') or ''}",
+            f"前回接触: {cprops.get('notes_last_contacted') or ''}",
+            f"ページURL: {linked_page}",
+            f"閲覧日時: {cprops.get('hs_analytics_last_timestamp') or ''}",
+        ]
+    )
+
+
 def post_slack_notification(
     contact: dict[str, Any],
     email_obj: dict[str, Any],
@@ -452,7 +556,39 @@ def post_slack_notification(
     mention = slack_map.get(owner_id, "")
     if not mention:
         raise RuntimeError(f"Slack mention missing for owner_id={owner_id}")
-    text = build_slack_text(contact, email_obj, mention)
+    text = build_email_slack_text(contact, email_obj, mention)
+    if bot_token:
+        data = slack_api_request(
+            bot_token,
+            "chat.postMessage",
+            {"channel": channel_id, "text": text, "mrkdwn": True, "unfurl_links": False},
+        )
+        return f"chat.postMessage:{data.get('ts')}"
+    if webhook_url:
+        response = requests.post(
+            webhook_url,
+            json={"text": text, "mrkdwn": True, "unfurl_links": False},
+            timeout=30,
+        )
+        response.raise_for_status()
+        if response.text.strip().lower() != "ok":
+            raise RuntimeError(f"Slack webhook failed: {response.status_code} {response.text[:500]}")
+        return "incoming_webhook:ok"
+    raise RuntimeError("Slack delivery requested, but SLACK_BOT_TOKEN or SLACK_WEBHOOK_URL is not set")
+
+
+def post_web_slack_notification(
+    contact: dict[str, Any],
+    slack_map: dict[str, str],
+    channel_id: str,
+    bot_token: str | None,
+    webhook_url: str | None,
+) -> str:
+    owner_id = str(contact.get("properties", {}).get("sales_staff_cpa") or "")
+    mention = slack_map.get(owner_id, "")
+    if not mention:
+        raise RuntimeError(f"Slack mention missing for owner_id={owner_id}")
+    text = build_web_slack_text(contact, mention)
     if bot_token:
         data = slack_api_request(
             bot_token,
@@ -506,21 +642,24 @@ def append_sheet_row(
     service_account_json: str,
     notify_time: datetime,
     contact: dict[str, Any],
-    email_obj: dict[str, Any],
+    action_type: str,
+    detail: str,
+    source_or_url: str,
+    recipient: str,
+    open_count: str,
+    related_url: str,
+    notification_id: str,
 ) -> str:
     if not spreadsheet_id:
         return "sheet skipped: spreadsheet id not set"
     client = get_gspread_client(service_account_json)
     spreadsheet = client.open_by_key(spreadsheet_id)
     cprops = contact.get("properties", {})
-    eprops = email_obj.get("properties", {})
     contact_id = str(contact.get("id"))
     owner_id = str(cprops.get("sales_staff_cpa") or "")
     owner_name = CPA_OWNER_NAMES.get(owner_id, owner_id or "担当未設定")
     contact_name = f"{cprops.get('lastname') or ''} {cprops.get('firstname') or ''}".strip()
     contact_url = f"https://app.hubspot.com/contacts/{PORTAL_ID}/contact/{contact_id}"
-    email_id = str(email_obj.get("id"))
-    email_url = f"https://app.hubspot.com/contacts/{PORTAL_ID}/record/0-49/{email_id}"
     worksheet = ensure_worksheet(spreadsheet, normalize_sheet_title(owner_name.replace(" ", "")))
     row = [
         notify_time.astimezone().strftime("%Y/%m/%d %H:%M:%S"),
@@ -529,14 +668,14 @@ def append_sheet_row(
         cprops.get("email") or "",
         cprops.get("yomi") or "",
         cprops.get("notes_last_contacted") or "",
-        "USCPA CRM営業メール開封",
-        eprops.get("hs_email_subject") or "",
-        eprops.get("hs_email_from_email") or "",
-        eprops.get("hs_email_to_email") or "",
-        eprops.get("hs_email_open_count") or "",
+        action_type,
+        detail,
+        source_or_url,
+        recipient,
+        open_count,
         contact_url,
-        f'=HYPERLINK("{email_url}","{email_id}")',
-        email_id,
+        f'=HYPERLINK("{related_url}","{notification_id}")' if related_url else "",
+        notification_id,
     ]
     worksheet.append_row(row, value_input_option="USER_ENTERED")
     return f"sheet appended:{worksheet.title}"
@@ -660,19 +799,29 @@ def main():
                     sheet_result = ""
                     if args.sheet_output:
                         try:
+                            email_url = f"https://app.hubspot.com/contacts/{PORTAL_ID}/record/0-49/{email_id}"
                             sheet_result = append_sheet_row(
                                 args.sheet_spreadsheet_id,
                                 args.google_service_account_json,
                                 now,
                                 contact,
-                                email_obj,
+                                "USCPA CRM営業メール開封",
+                                eprops.get("hs_email_subject") or "",
+                                eprops.get("hs_email_from_email") or "",
+                                eprops.get("hs_email_to_email") or "",
+                                str(eprops.get("hs_email_open_count") or ""),
+                                email_url,
+                                email_id,
                             )
                         except Exception as exc:
                             sheet_result = f"sheet error: {exc}"
                     update_contact_for_notification(
                         client,
                         contact,
-                        email_obj,
+                        email_id,
+                        "USCPA CRM営業メール開封",
+                        eprops.get("hs_email_subject") or "",
+                        eprops.get("hs_email_from_email") or "",
                         slack_map,
                         now,
                         trigger_hubspot_workflow=args.delivery in {"hubspot", "both"},
@@ -684,6 +833,84 @@ def main():
                     row["sheet_result"] = sheet_result
             rows.append(row)
 
+    web_contacts: list[dict[str, Any]] = []
+    if not args.disable_web:
+        web_contacts = search_recent_web_contacts(client, since_ms, args.limit_web_contacts)
+
+    for contact in web_contacts:
+        contact_id = str(contact.get("id"))
+        cprops = contact.get("properties", {})
+        web_skip = should_skip_web_contact(contact)
+        notification_key = web_notification_key(contact)
+        reason = web_skip or should_notify_contact(
+            contact, notification_key, past_member_ids, now, args.suppression_days
+        )
+        page_url = cprops.get("hs_analytics_last_url") or ""
+        row = {
+            "action": "web_view",
+            "notification_key": notification_key,
+            "contact_id": contact_id,
+            "contact_url": f"https://app.hubspot.com/contacts/{PORTAL_ID}/contact/{contact_id}",
+            "status": "eligible" if reason is None else "skipped",
+            "reason": reason or "",
+            "page_url": page_url,
+            "page_timestamp": cprops.get("hs_analytics_last_timestamp"),
+            "contact_email": cprops.get("email"),
+            "contact_name": f"{cprops.get('lastname') or ''} {cprops.get('firstname') or ''}".strip(),
+            "sales_staff_cpa": cprops.get("sales_staff_cpa"),
+            "yomi": cprops.get("yomi"),
+            "notes_last_contacted": cprops.get("notes_last_contacted"),
+        }
+        if reason is None and args.apply:
+            if args.max_updates and updates >= args.max_updates:
+                row["status"] = "skipped"
+                row["reason"] = "max updates reached"
+            else:
+                slack_result = ""
+                if args.delivery in {"slack", "both"}:
+                    slack_result = post_web_slack_notification(
+                        contact,
+                        slack_map,
+                        args.slack_channel_id,
+                        args.slack_bot_token,
+                        args.slack_webhook_url,
+                    )
+                sheet_result = ""
+                if args.sheet_output:
+                    try:
+                        sheet_result = append_sheet_row(
+                            args.sheet_spreadsheet_id,
+                            args.google_service_account_json,
+                            now,
+                            contact,
+                            "USCPA Webページ閲覧",
+                            cprops.get("hs_analytics_last_timestamp") or "",
+                            page_url,
+                            "",
+                            "",
+                            page_url,
+                            notification_key,
+                        )
+                    except Exception as exc:
+                        sheet_result = f"sheet error: {exc}"
+                update_contact_for_notification(
+                    client,
+                    contact,
+                    notification_key,
+                    "USCPA Webページ閲覧",
+                    cprops.get("hs_analytics_last_timestamp") or "",
+                    page_url,
+                    slack_map,
+                    now,
+                    trigger_hubspot_workflow=args.delivery in {"hubspot", "both"},
+                )
+                updates += 1
+                row["status"] = "updated"
+                row["delivery"] = args.delivery
+                row["slack_result"] = slack_result
+                row["sheet_result"] = sheet_result
+        rows.append(row)
+
     tag = time.strftime("%Y%m%d_%H%M%S", time.localtime())
     out = OUTPUT_DIR / f"uscpa_sales_email_open_monitor_{tag}.json"
     summary = {
@@ -692,6 +919,7 @@ def main():
         "lookback_hours": args.lookback_hours,
         "since": since.isoformat(),
         "candidate_emails": len(email_ids),
+        "candidate_web_contacts": len(web_contacts),
         "associated_contacts": len(all_contact_ids),
         "eligible": sum(1 for row in rows if row["status"] == "eligible"),
         "updated": updates,
