@@ -2,8 +2,8 @@ name: USCPA sales email open monitor
 
 on:
   schedule:
-    # Every 30 minutes, offset from the top of the hour to reduce schedule delays.
-    - cron: "7,37 * * * *"
+    # Every 15 minutes.
+    - cron: "*/15 * * * *"
   workflow_dispatch:
     inputs:
       apply:
