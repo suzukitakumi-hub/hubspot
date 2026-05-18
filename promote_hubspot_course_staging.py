@@ -79,6 +79,12 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_VALIDATION_REPORT_MAX_AGE_MINUTES,
         help="Refuse promotion when the validation report is older than this threshold.",
     )
+    parser.add_argument(
+        "--sync-layout",
+        action="store_true",
+        default=os.environ.get("HUBSPOT_COURSE_SYNC_LAYOUT_EACH_RUN", "").strip().lower() in {"1", "true", "yes", "on"},
+        help="Also resync live tab formatting from CIA/USCPA. Disabled by default to reduce Sheets API quota pressure.",
+    )
     return parser.parse_args()
 
 
@@ -556,11 +562,13 @@ def main() -> None:
     ]:
         delete_worksheet_if_exists(spreadsheet, worksheets_by_title, title)
 
-    sync_live_layout_from_cia(spreadsheet, worksheets_by_title)
+    if args.sync_layout:
+        sync_live_layout_from_cia(spreadsheet, worksheets_by_title)
 
     print(f"validation_report={os.path.abspath(report_path)}")
     print(f"promotion_mode={promotion_mode}")
     print(f"partial_ga4_blank_rows={partial_blank_rows}")
+    print(f"layout_sync={'enabled' if args.sync_layout else 'skipped'}")
     print(f"live_sheet_updated=https://docs.google.com/spreadsheets/d/{args.spreadsheet_id}/edit")
 
 
