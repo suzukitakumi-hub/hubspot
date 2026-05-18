@@ -19,13 +19,15 @@ from hubspot_course_sheet_guardrails import (
     DEFAULT_SPREADSHEET_ID,
     JST,
     TARGET_COURSES,
+    batch_get_sheet_matrices,
     derive_ga4_map_manifest_path,
     derive_validation_report_path,
     header_matches_expected,
+    load_worksheets_by_title,
     now_jst,
     now_jst_iso,
     normalize_header_row,
-    read_worksheet_matrix,
+    sheets_call,
     snapshot_sha256,
     staging_tab_title,
     strip_literal_prefix,
@@ -442,29 +444,22 @@ def normalize_row(row: List[str]) -> List[str]:
     return current
 
 
-def read_staging_snapshot(spreadsheet) -> Tuple[Dict[str, List[List[str]]], Dict[str, List[List[str]]], Dict[str, dict], Dict[str, List[str]], List[dict]]:
-    from gspread import WorksheetNotFound
-
-    display_snapshot: Dict[str, List[List[str]]] = {}
-    formula_snapshot: Dict[str, List[List[str]]] = {}
+def read_staging_snapshot(
+    display_snapshot: Dict[str, List[List[str]]],
+    formula_snapshot: Dict[str, List[List[str]]],
+) -> Tuple[Dict[str, dict], Dict[str, List[str]], List[dict]]:
     rows_by_email_id: Dict[str, dict] = {}
     ids_by_course: Dict[str, List[str]] = {course: [] for course in TARGET_COURSES}
     issues: List[dict] = []
 
     for course in TARGET_COURSES:
         title = staging_tab_title(course)
-        try:
-            worksheet = spreadsheet.worksheet(title)
-        except WorksheetNotFound:
-            display_snapshot[title] = []
-            formula_snapshot[title] = []
+        if title not in display_snapshot and title not in formula_snapshot:
             add_issue(issues, "missing_staging_tab", f"Staging tab {title} was not found.", course=course, tab=title)
             continue
 
-        display_values = read_worksheet_matrix(worksheet)
-        formula_values = read_worksheet_matrix(worksheet, value_render_option="FORMULA")
-        display_snapshot[title] = display_values
-        formula_snapshot[title] = formula_values
+        display_values = display_snapshot.get(title, [])
+        formula_values = formula_snapshot.get(title, [])
 
         if not display_values:
             add_issue(issues, "empty_staging_tab", f"Staging tab {title} is empty.", course=course, tab=title)
@@ -537,7 +532,7 @@ def read_staging_snapshot(spreadsheet) -> Tuple[Dict[str, List[List[str]]], Dict
             }
             ids_by_course[course].append(email_id)
 
-    return display_snapshot, formula_snapshot, rows_by_email_id, ids_by_course, issues
+    return rows_by_email_id, ids_by_course, issues
 
 
 def compare_staging_to_source(
@@ -721,9 +716,18 @@ def main() -> None:
     ]
     creds = Credentials.from_service_account_file(args.service_account_json, scopes=scopes)
     gc = gspread.authorize(creds)
-    spreadsheet = gc.open_by_key(args.spreadsheet_id)
+    spreadsheet = sheets_call("validation.open_by_key", lambda: gc.open_by_key(args.spreadsheet_id))
 
-    display_snapshot, formula_snapshot, staging_rows, staging_ids_by_course, issues = read_staging_snapshot(spreadsheet)
+    worksheets_by_title = load_worksheets_by_title(spreadsheet)
+    staging_titles = [staging_tab_title(course) for course in TARGET_COURSES]
+    display_snapshot = batch_get_sheet_matrices(spreadsheet, worksheets_by_title, staging_titles)
+    formula_snapshot = batch_get_sheet_matrices(
+        spreadsheet,
+        worksheets_by_title,
+        staging_titles,
+        value_render_option="FORMULA",
+    )
+    staging_rows, staging_ids_by_course, issues = read_staging_snapshot(display_snapshot, formula_snapshot)
     display_snapshot_hash = snapshot_sha256(display_snapshot)
     formula_snapshot_hash = snapshot_sha256(formula_snapshot)
 
