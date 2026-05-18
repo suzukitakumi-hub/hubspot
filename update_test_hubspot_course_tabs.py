@@ -22,6 +22,7 @@ from hubspot_course_sheet_guardrails import (
     parse_iso_datetime,
     set_worksheet_hidden,
     sha256_file,
+    sheets_call,
     staging_tab_title,
     write_sheet_values,
 )
@@ -335,7 +336,7 @@ def load_management_index(service_account_json: str, month: str) -> dict:
     ]
     creds = Credentials.from_service_account_file(service_account_json, scopes=scopes)
     gc = gspread.authorize(creds)
-    sh = gc.open_by_key(MANAGEMENT_SPREADSHEET_ID)
+    sh = sheets_call("management.open_by_key", lambda: gc.open_by_key(MANAGEMENT_SPREADSHEET_ID))
 
     index = {
         "progress_by_link_key": {},
@@ -368,8 +369,8 @@ def load_management_index(service_account_json: str, month: str) -> dict:
             "email_id": (email_id or "").strip(),
         }
 
-    progress_ws = sh.worksheet("進捗シート")
-    progress_values = progress_ws.get_all_values()
+    progress_ws = sheets_call("management.worksheet:進捗シート", lambda: sh.worksheet("進捗シート"))
+    progress_values = sheets_call("management.values:進捗シート", progress_ws.get_all_values)
     if progress_values:
         header = progress_values[0]
         idx_key = header.index("リンクキー")
@@ -411,8 +412,8 @@ def load_management_index(service_account_json: str, month: str) -> dict:
         ("新管理表", "リンクキー", "new_by_email_id"),
         ("CPA_DM_一覧", "hs_Eメール名", "legacy_by_email_id"),
     ]:
-        worksheet = sh.worksheet(tab_name)
-        values = worksheet.get_all_values()
+        worksheet = sheets_call(f"management.worksheet:{tab_name}", lambda tab_name=tab_name: sh.worksheet(tab_name))
+        values = sheets_call(f"management.values:{tab_name}", worksheet.get_all_values)
         if not values:
             continue
         header = values[0]
@@ -823,12 +824,12 @@ def write_staging_tabs(
     ]
     creds = Credentials.from_service_account_file(service_account_json, scopes=scopes)
     gc = gspread.authorize(creds)
-    sh = gc.open_by_key(spreadsheet_id)
+    sh = sheets_call("target.open_by_key", lambda: gc.open_by_key(spreadsheet_id))
 
     for tab_name, rows in course_tabs.items():
         title = staging_tab_title(tab_name)
         ws = ensure_worksheet(sh, title, max(200, len(rows) + 30), len(COURSE_SHEET_HEADER) + 3)
-        write_sheet_values(ws, [COURSE_SHEET_HEADER] + rows)
+        write_sheet_values(ws, [COURSE_SHEET_HEADER] + rows, apply_formatting=False)
         set_worksheet_hidden(sh, ws, True)
 
 
