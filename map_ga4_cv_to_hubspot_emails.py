@@ -31,7 +31,7 @@ from hubspot_course_sheet_guardrails import (
 BASE_URL = "https://api.hubapi.com"
 JST = dt.timezone(dt.timedelta(hours=9))
 EMAIL_FETCH_MARGIN_DAYS = 31
-COURSE_KEYS = ["CIA", "CISA", "CFE", "IFRS", "USCPA", "MBA"]
+COURSE_KEYS = ["CIA", "CISA", "CFE", "IFRS", "USCPA", "MBA", "AAIA"]
 EXTRA_CONVERSION_EVENTS = {"generate_lead", "purchase", "form_submit", "form_start"}
 
 

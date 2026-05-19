@@ -7,6 +7,7 @@
 - 実行時刻: 毎週火曜・金曜 08:00 JST
 - GitHub cron: `0 23 * * 1,4`
 - 更新内容: 当月分を再取得し、同一メールIDは上書き、新規メールは追加
+- 対象講座: CIA / CISA / CFE / IFRS / USCPA / MBA / AAIA
 - 実行後: ライブシート監査を実行し、issue が残ればジョブを失敗させる
 
 ## 必要な GitHub Secrets

@@ -11,7 +11,7 @@ from typing import Any, Callable, Dict, List, TypeVar
 
 
 JST = dt.timezone(dt.timedelta(hours=9))
-TARGET_COURSES = ["CIA", "CISA", "CFE", "IFRS", "USCPA", "MBA"]
+TARGET_COURSES = ["CIA", "CISA", "CFE", "IFRS", "USCPA", "MBA", "AAIA"]
 REVIEW_HUBSPOT_ONLY_SHEET = "HubSpot未登録送信"
 REVIEW_MASTER_UNMATCHED_SHEET = "正本未突合"
 REVIEW_SHEET_HEADERS = {

@@ -32,7 +32,7 @@ BASE_URL = "https://api.hubapi.com"
 JST = dt.timezone(dt.timedelta(hours=9))
 EMAIL_FETCH_MARGIN_DAYS = 31
 
-TARGET_COURSES = ["CIA", "CISA", "CFE", "IFRS", "USCPA", "MBA"]
+TARGET_COURSES = ["CIA", "CISA", "CFE", "IFRS", "USCPA", "MBA", "AAIA"]
 PORTAL_ID = "39827439"
 MANAGEMENT_SPREADSHEET_ID = "1oF5ospicN7doWTwa5tm0QY5isSBaPiQ3lNA169mHD8Y"
 
@@ -47,6 +47,7 @@ COURSE_LIST_ALIASES = {
     "IFRS": ["IFRS"],
     "USCPA": ["USCPA", "CPA受講生", "CPA案件", "CPA案件ALL", "USCPA案件", "米国CPA", "U.S.CPA"],
     "MBA": ["MBA"],
+    "AAIA": ["AAIA", "AI監査"],
 }
 
 HUBSPOT_EMAIL_ID_RE = re.compile(r"/details/(\d+)/performance")
