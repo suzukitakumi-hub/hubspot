@@ -40,6 +40,11 @@ on:
         required: true
         default: true
         type: boolean
+      sheet_setup_only:
+        description: "Only ensure Google Sheets tabs, headers, and contact checkboxes"
+        required: true
+        default: false
+        type: boolean
 
 concurrency:
   group: uscpa-sales-email-open-monitor
@@ -74,7 +79,7 @@ jobs:
         run: pip install -r requirements-hubspot-course-update.txt
 
       - name: Write Google service account JSON
-        if: ${{ github.event_name == 'schedule' || inputs.sheet_output == true }}
+        if: ${{ github.event_name == 'schedule' || inputs.sheet_output == true || inputs.sheet_setup_only == true }}
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT }}
         run: |
@@ -101,6 +106,10 @@ jobs:
 
           if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ inputs.sheet_output }}" = "true" ]; then
             args+=(--sheet-output)
+          fi
+
+          if [ "${{ inputs.sheet_setup_only }}" = "true" ]; then
+            args+=(--sheet-setup-only)
           fi
 
           python uscpa_sales_email_open_monitor.py "${args[@]}"

@@ -18,10 +18,33 @@ PAST_LEAD_LIST_ID = "6567"
 OUTPUT_DIR = Path("outputs")
 OUTPUT_DIR.mkdir(exist_ok=True)
 
+CONTACT_CHECK_HEADERS = [
+    "営業接触済み",
+    "接触不要",
+]
+
+LEGACY_SHEET_HEADERS = [
+    "通知日時",
+    "担当者",
+    "顧客名",
+    "メール",
+    "ヨミ",
+    "前回接触",
+    "行動",
+    "詳細",
+    "送信元/ページURL",
+    "宛先",
+    "開封数",
+    "HubSpot",
+    "関連URL",
+    "通知ID",
+]
+
 SHEET_HEADERS = [
     "通知日時",
     "担当者",
     "顧客名",
+    *CONTACT_CHECK_HEADERS,
     "メール",
     "ヨミ",
     "前回接触",
@@ -176,6 +199,11 @@ def parse_args():
         action="store_true",
         default=os.environ.get("USCPA_SHEET_OUTPUT", "").lower() in {"1", "true", "yes"},
         help="通知済みレコードをGoogleスプレッドシートにも追記する。",
+    )
+    parser.add_argument(
+        "--sheet-setup-only",
+        action="store_true",
+        help="Google Sheetsの担当者別タブ、ヘッダー、接触管理チェック列だけを整備して終了する。",
     )
     parser.add_argument(
         "--disable-web",
@@ -615,6 +643,19 @@ def normalize_sheet_title(value: str) -> str:
     return title[:99] or "未設定"
 
 
+def column_letter(index_1based: int) -> str:
+    value = index_1based
+    out = ""
+    while value > 0:
+        value, remainder = divmod(value - 1, 26)
+        out = chr(65 + remainder) + out
+    return out
+
+
+def header_range() -> str:
+    return f"A1:{column_letter(len(SHEET_HEADERS))}1"
+
+
 def get_gspread_client(service_account_json: str):
     import gspread
 
@@ -624,17 +665,106 @@ def get_gspread_client(service_account_json: str):
     return gspread.service_account(filename=str(path))
 
 
+def normalized_header(values: list[list[Any]], width: int) -> list[str]:
+    row = [str(value) for value in (values[0] if values else [])]
+    if len(row) < width:
+        row.extend([""] * (width - len(row)))
+    return row[:width]
+
+
+def set_contact_checkbox_validation(worksheet) -> None:
+    worksheet.spreadsheet.batch_update(
+        {
+            "requests": [
+                {
+                    "setDataValidation": {
+                        "range": {
+                            "sheetId": worksheet.id,
+                            "startRowIndex": 1,
+                            "endRowIndex": max(worksheet.row_count, 1000),
+                            "startColumnIndex": 3,
+                            "endColumnIndex": 5,
+                        },
+                        "rule": {
+                            "condition": {"type": "BOOLEAN"},
+                            "strict": True,
+                            "showCustomUi": True,
+                        },
+                    }
+                },
+                {
+                    "updateDimensionProperties": {
+                        "range": {
+                            "sheetId": worksheet.id,
+                            "dimension": "COLUMNS",
+                            "startIndex": 3,
+                            "endIndex": 5,
+                        },
+                        "properties": {"pixelSize": 110},
+                        "fields": "pixelSize",
+                    }
+                },
+            ]
+        }
+    )
+
+
 def ensure_worksheet(spreadsheet, title: str):
     try:
         worksheet = spreadsheet.worksheet(title)
     except Exception:
         worksheet = spreadsheet.add_worksheet(title=title, rows=1000, cols=len(SHEET_HEADERS))
-    header_range = f"A1:{chr(ord('A') + len(SHEET_HEADERS) - 1)}1"
-    values = worksheet.get(header_range)
-    if not values or values[0] != SHEET_HEADERS:
-        worksheet.update(header_range, [SHEET_HEADERS])
-        worksheet.freeze(rows=1)
+
+    if worksheet.row_count < 1000 or worksheet.col_count < len(SHEET_HEADERS):
+        worksheet.resize(rows=max(worksheet.row_count, 1000), cols=max(worksheet.col_count, len(SHEET_HEADERS)))
+
+    header_values = worksheet.get(f"A1:{column_letter(len(SHEET_HEADERS))}1")
+    current = normalized_header(header_values, len(SHEET_HEADERS))
+    legacy = normalized_header(header_values, len(LEGACY_SHEET_HEADERS))
+    if legacy == LEGACY_SHEET_HEADERS and current != SHEET_HEADERS:
+        worksheet.spreadsheet.batch_update(
+            {
+                "requests": [
+                    {
+                        "insertDimension": {
+                            "range": {
+                                "sheetId": worksheet.id,
+                                "dimension": "COLUMNS",
+                                "startIndex": 3,
+                                "endIndex": 5,
+                            },
+                            "inheritFromBefore": False,
+                        }
+                    }
+                ]
+            }
+        )
+        worksheet.resize(rows=max(worksheet.row_count, 1000), cols=max(worksheet.col_count, len(SHEET_HEADERS)))
+        current = []
+
+    if current != SHEET_HEADERS:
+        worksheet.update(header_range(), [SHEET_HEADERS])
+    worksheet.freeze(rows=1)
+    set_contact_checkbox_validation(worksheet)
     return worksheet
+
+
+def setup_sheet_tabs(spreadsheet_id: str | None, service_account_json: str) -> dict[str, Any]:
+    if not spreadsheet_id:
+        raise RuntimeError("USCPA_SHEET_SPREADSHEET_ID is not set")
+    client = get_gspread_client(service_account_json)
+    spreadsheet = client.open_by_key(spreadsheet_id)
+    tabs = []
+    for owner_name in CPA_OWNER_NAMES.values():
+        title = normalize_sheet_title(owner_name.replace(" ", ""))
+        ensure_worksheet(spreadsheet, title)
+        tabs.append(title)
+    return {
+        "spreadsheet_id": spreadsheet_id,
+        "tabs": tabs,
+        "headers": SHEET_HEADERS,
+        "checkbox_columns": CONTACT_CHECK_HEADERS,
+    }
 
 
 def append_sheet_row(
@@ -665,6 +795,8 @@ def append_sheet_row(
         notify_time.astimezone().strftime("%Y/%m/%d %H:%M:%S"),
         owner_name,
         f'=HYPERLINK("{contact_url}","{contact_name or contact_id}")',
+        False,
+        False,
         cprops.get("email") or "",
         cprops.get("yomi") or "",
         cprops.get("notes_last_contacted") or "",
@@ -682,7 +814,7 @@ def append_sheet_row(
 
 
 def validate_runtime_config(args, slack_map: dict[str, str]) -> None:
-    if args.delivery in {"slack", "both"}:
+    if not args.sheet_setup_only and args.delivery in {"slack", "both"}:
         if not args.slack_bot_token and not args.slack_webhook_url:
             raise RuntimeError(
                 "Slack delivery requires SLACK_BOT_TOKEN or SLACK_WEBHOOK_URL"
@@ -699,7 +831,7 @@ def validate_runtime_config(args, slack_map: dict[str, str]) -> None:
                 + ". Check SLACK_BOT_TOKEN users:read.email scope or USCPA_SLACK_USER_MAP_JSON."
             )
 
-    if args.sheet_output:
+    if args.sheet_output or args.sheet_setup_only:
         if not args.sheet_spreadsheet_id:
             raise RuntimeError("USCPA_SHEET_SPREADSHEET_ID is not set")
         if not Path(args.google_service_account_json).exists():
@@ -710,10 +842,26 @@ def validate_runtime_config(args, slack_map: dict[str, str]) -> None:
 
 def main():
     args = parse_args()
-    client = HubSpot()
     now = utc_now()
     since = now - timedelta(hours=args.lookback_hours)
     slack_map = json.loads(args.slack_map_json or "{}")
+    if args.sheet_setup_only:
+        validate_runtime_config(args, slack_map)
+        result = setup_sheet_tabs(args.sheet_spreadsheet_id, args.google_service_account_json)
+        tag = time.strftime("%Y%m%d_%H%M%S", time.localtime())
+        out = OUTPUT_DIR / f"uscpa_sales_email_open_monitor_{tag}.json"
+        summary = {
+            "apply": False,
+            "sheet_setup_only": True,
+            "updated": 0,
+            **result,
+        }
+        out.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        print(f"details: {out}")
+        return
+
+    client = HubSpot()
     if args.delivery in {"slack", "both"} and args.slack_bot_token:
         slack_map = lookup_slack_mentions_by_email(args.slack_bot_token, slack_map)
     validate_runtime_config(args, slack_map)
