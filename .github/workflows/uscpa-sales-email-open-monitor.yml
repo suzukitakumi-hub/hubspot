@@ -115,7 +115,7 @@ jobs:
           python uscpa_sales_email_open_monitor.py "${args[@]}"
 
       - name: Send run email notification
-        if: ${{ always() && vars.USCPA_RUN_EMAIL_NOTIFY == 'true' }}
+        if: ${{ always() && vars.USCPA_RUN_EMAIL_NOTIFY == 'true' && steps.monitor.outcome != 'success' }}
         env:
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
@@ -123,7 +123,6 @@ jobs:
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           SMTP_FROM: ${{ secrets.SMTP_FROM }}
           RUN_EMAIL_TO: suzuki.takumi@abitus.co.jp
-          RUN_EMAIL_NOTIFY_UNTIL_UTC: "2026-05-19T15:00:00Z"
           MONITOR_OUTCOME: ${{ steps.monitor.outcome }}
           RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
           WORKFLOW_NAME: ${{ github.workflow }}
@@ -132,16 +131,10 @@ jobs:
           import os
           import smtplib
           import ssl
-          import sys
           from datetime import datetime, timezone
           from email.message import EmailMessage
 
-          until_raw = os.environ["RUN_EMAIL_NOTIFY_UNTIL_UTC"]
-          until = datetime.fromisoformat(until_raw.replace("Z", "+00:00"))
           now = datetime.now(timezone.utc)
-          if now >= until:
-              print(f"email notification skipped: expired at {until_raw}")
-              sys.exit(0)
 
           required = ["SMTP_HOST", "SMTP_USERNAME", "SMTP_PASSWORD", "SMTP_FROM", "RUN_EMAIL_TO"]
           missing = [name for name in required if not os.environ.get(name)]
@@ -158,8 +151,7 @@ jobs:
                   f"Run: {os.environ['RUN_URL']}",
                   f"Time UTC: {now.isoformat()}",
                   "",
-                  "この通知は一時検証用です。",
-                  f"停止予定: {until_raw}",
+                  "成功時のメール通知は停止済みです。このメールは失敗時のみ送信されます。",
               ]
           )
 
