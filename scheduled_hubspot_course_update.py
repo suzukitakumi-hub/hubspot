@@ -38,6 +38,18 @@ def parse_args() -> argparse.Namespace:
         default=int(os.environ.get("HUBSPOT_COURSE_POST_PROMOTE_COOLDOWN_SECONDS", "70")),
         help="Cooldown before live audit after promotion to avoid Sheets API per-minute quotas.",
     )
+    parser.add_argument(
+        "--audit-issue-retry-attempts",
+        type=int,
+        default=int(os.environ.get("HUBSPOT_COURSE_AUDIT_ISSUE_RETRY_ATTEMPTS", "3")),
+        help="Retry live audit when it completes but still reports issues, allowing Sheets propagation to settle.",
+    )
+    parser.add_argument(
+        "--audit-issue-retry-sleep-seconds",
+        type=int,
+        default=int(os.environ.get("HUBSPOT_COURSE_AUDIT_ISSUE_RETRY_SLEEP_SECONDS", "90")),
+        help="Base cooldown between live-audit issue retries.",
+    )
     return parser.parse_args()
 
 
@@ -110,6 +122,31 @@ def cooldown(label: str, seconds: int, log_file: Path) -> None:
 
 def read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def run_audit_until_clean(
+    audit_cmd: list[str],
+    audit_report: Path,
+    log_file: Path,
+    attempts: int,
+    retry_sleep_seconds: int,
+) -> dict:
+    attempts = max(1, attempts)
+    for attempt in range(1, attempts + 1):
+        run_logged(audit_cmd, log_file, attempts=3, retry_sleep_seconds=90)
+        audit = read_json(audit_report)
+        issue_count = len(audit.get("issues", []) or [])
+        if issue_count == 0 or attempt >= attempts:
+            return audit
+
+        sleep_seconds = retry_sleep_seconds * attempt
+        with log_file.open("a", encoding="utf-8") as handle:
+            handle.write(
+                f"retrying_live_audit_for_reported_issues "
+                f"attempt={attempt}/{attempts} sleep_seconds={sleep_seconds} issue_count={issue_count}\n"
+            )
+        time.sleep(sleep_seconds)
+    return read_json(audit_report)
 
 
 def main() -> None:
@@ -195,8 +232,13 @@ def main() -> None:
                 source_snapshot,
             ]
             cooldown("before_live_audit", args.post_promote_cooldown_seconds, run_log)
-            run_logged(audit_cmd, run_log, attempts=3, retry_sleep_seconds=90)
-            audit = read_json(Path(audit_report))
+            audit = run_audit_until_clean(
+                audit_cmd,
+                Path(audit_report),
+                run_log,
+                attempts=args.audit_issue_retry_attempts,
+                retry_sleep_seconds=args.audit_issue_retry_sleep_seconds,
+            )
             issue_count = len(audit.get("issues", []) or [])
             summary["results"].append(
                 {
