@@ -173,6 +173,19 @@ def batch_get_matrices(spreadsheet, worksheets_by_title: dict, titles: list[str]
     return out
 
 
+def preformat_live_value_columns(worksheet) -> None:
+    run_sheets_call(
+        f"preformat_value_columns:{worksheet.title}",
+        lambda: worksheet.batch_format(
+            [
+                {"range": "A:A", "format": {"numberFormat": {"type": "TEXT"}}},
+                {"range": "C:C", "format": {"numberFormat": {"type": "TEXT"}}},
+                {"range": f"O:{COURSE_SHEET_LAST_COLUMN}", "format": {"numberFormat": {"type": "TEXT"}}},
+            ]
+        ),
+    )
+
+
 def collect_blocked_email_ids(report: dict) -> tuple[str, set[str]]:
     issues = report.get("issues", []) or []
     issue_codes = {str(issue.get("code", "")).strip() for issue in issues}
@@ -526,6 +539,7 @@ def main() -> None:
                 ),
             )
         output_values = [values[0]] + merged_rows
+        preformat_live_value_columns(live_ws)
         run_sheets_call(
             f"write_sheet_values:{course}",
             lambda live_ws=live_ws, output_values=output_values: write_sheet_values(
