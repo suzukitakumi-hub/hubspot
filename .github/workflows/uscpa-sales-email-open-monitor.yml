@@ -2,8 +2,8 @@ name: USCPA reactivation monitor
 
 on:
   schedule:
-    # Every 15 minutes.
-    - cron: "*/15 * * * *"
+    # Every 15 minutes, offset from common high-load quarter-hour boundaries.
+    - cron: "7,22,37,52 * * * *"
   workflow_dispatch:
     inputs:
       apply:

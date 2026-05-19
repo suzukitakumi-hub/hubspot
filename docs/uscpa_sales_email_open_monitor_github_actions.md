@@ -45,7 +45,7 @@ Windowsスケジューラー依存を外し、GitHub Actionsで `uscpa_sales_ema
 
 - ファイル: `.github/workflows/uscpa-sales-email-open-monitor.yml`
 - 定期実行: 15分ごと
-- cron: `*/15 * * * *`
+- cron: `7,22,37,52 * * * *`
 - 手動実行: `workflow_dispatch`
 
 ## テスト手順
