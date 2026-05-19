@@ -1006,7 +1006,7 @@ def main() -> None:
                 ga4_breakdown_jp,
                 " | ".join(list_names),
                 internal_ids_text,
-                args.month,
+                as_literal_text(args.month),
                 course,
             ]
         )

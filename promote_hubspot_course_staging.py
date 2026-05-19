@@ -20,6 +20,7 @@ from hubspot_course_sheet_guardrails import (
     header_matches_expected,
     load_json,
     now_jst,
+    normalize_month_value,
     normalize_sheet_matrix,
     parse_iso_datetime,
     snapshot_sha256,
@@ -510,7 +511,7 @@ def main() -> None:
             for row in existing_values[1:]:
                 if not any(cell != "" for cell in row):
                     continue
-                if row[month_idx] != args.month:
+                if normalize_month_value(row[month_idx]) != args.month:
                     preserved_rows.append(list(row))
         merged_rows = preserved_rows + [list(row) for row in values[1:]]
         merged_rows.sort(key=lambda row: (row[send_date_idx], row[header_index["メール内部名"]]))

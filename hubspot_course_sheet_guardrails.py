@@ -5,6 +5,7 @@ import datetime as dt
 import hashlib
 import json
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, TypeVar
@@ -198,6 +199,34 @@ def write_json(path: str, data: Dict[str, Any]) -> None:
 def strip_literal_prefix(value: Any) -> str:
     text = "" if value is None else str(value)
     return text[1:] if text.startswith("'") else text
+
+
+def normalize_month_value(value: Any) -> str:
+    text = strip_literal_prefix(value).strip()
+    if not text:
+        return ""
+    if re.fullmatch(r"\d{4}-\d{2}", text):
+        return text
+
+    match = re.match(r"^(\d{4})[-/.年](\d{1,2})(?:[-/.月].*)?$", text)
+    if match:
+        return f"{int(match.group(1)):04d}-{int(match.group(2)):02d}"
+
+    for fmt in ("%m/%d/%Y", "%b %Y", "%B %Y"):
+        try:
+            parsed = dt.datetime.strptime(text, fmt)
+            return f"{parsed.year:04d}-{parsed.month:02d}"
+        except ValueError:
+            pass
+
+    try:
+        serial = float(text)
+    except ValueError:
+        return text
+    if 20000 <= serial <= 60000:
+        parsed_date = dt.date(1899, 12, 30) + dt.timedelta(days=int(serial))
+        return f"{parsed_date.year:04d}-{parsed_date.month:02d}"
+    return text
 
 
 def staging_tab_title(course: str) -> str:

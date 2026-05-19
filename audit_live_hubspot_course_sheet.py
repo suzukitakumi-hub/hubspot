@@ -20,6 +20,7 @@ from hubspot_course_sheet_guardrails import (
     derive_ga4_map_manifest_path,
     header_matches_expected,
     load_worksheets_by_title,
+    normalize_month_value,
     now_jst_iso,
     normalize_header_row,
     sheets_call,
@@ -279,7 +280,7 @@ def main() -> None:
                 idx = header_index[name]
                 return formula_row[idx] if idx < len(formula_row) else ""
 
-            if strip_literal_prefix(display("対象月")) != args.month:
+            if normalize_month_value(display("対象月")) != args.month:
                 continue
 
             per_course_rows[course] += 1

@@ -27,6 +27,7 @@ from hubspot_course_sheet_guardrails import (
     now_jst,
     now_jst_iso,
     normalize_header_row,
+    normalize_month_value,
     sheets_call,
     snapshot_sha256,
     staging_tab_title,
@@ -588,7 +589,7 @@ def compare_staging_to_source(
         display_row = row_info["display_row"]
         formula_row = row_info["formula_row"]
 
-        compare_field(email_id, "対象月", strip_literal_prefix(display_row[COURSE_SHEET_INDEX["対象月"]]), month, row_info)
+        compare_field(email_id, "対象月", normalize_month_value(display_row[COURSE_SHEET_INDEX["対象月"]]), month, row_info)
         compare_field(email_id, "講座", strip_literal_prefix(display_row[COURSE_SHEET_INDEX["講座"]]), context["course"], row_info)
         compare_field(email_id, "送付日", strip_literal_prefix(display_row[COURSE_SHEET_INDEX["送付日"]]), context["send_date_text"], row_info)
         compare_field(email_id, "メール件名", display_row[COURSE_SHEET_INDEX["メール件名（HubSpotリンク）"]], context["subject"], row_info)
