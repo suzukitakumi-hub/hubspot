@@ -475,6 +475,9 @@ def main() -> None:
 
     for course in TARGET_COURSES:
         values = [list(row) for row in staging_formula_snapshot[staging_tab_title(course)]]
+        for row in values[1:]:
+            if len(row) > month_idx:
+                row[month_idx] = args.month
         if promotion_mode == "partial":
             for row in values[1:]:
                 email_id = parse_hyperlink_email_id(row[header_index["メール件名（HubSpotリンク）"]])

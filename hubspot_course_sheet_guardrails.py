@@ -385,6 +385,16 @@ def write_sheet_values(worksheet, values, apply_formatting: bool = True) -> None
     materialized_values = [list(row) for row in values]
     if materialized_values and normalize_header_row(materialized_values[0]) == COURSE_SHEET_HEADER:
         materialized_values[0] = list(COURSE_SHEET_DISPLAY_HEADER)
+    if apply_formatting:
+        sheets_call(
+            f"{worksheet.title}.pre_text_formats",
+            lambda: worksheet.batch_format(
+                [
+                    {"range": "A:C", "format": {"numberFormat": {"type": "TEXT"}}},
+                    {"range": f"O:{COURSE_SHEET_LAST_COLUMN}", "format": {"numberFormat": {"type": "TEXT"}}},
+                ]
+            ),
+        )
     sheets_call(f"{worksheet.title}.clear", worksheet.clear)
     sheets_call(
         f"{worksheet.title}.update",
