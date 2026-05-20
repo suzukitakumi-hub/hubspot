@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import os
 import re
-import time
 
 from hubspot_course_sheet_guardrails import (
     COURSE_SHEET_HEADER,
@@ -23,6 +22,7 @@ from hubspot_course_sheet_guardrails import (
     normalize_month_value,
     normalize_sheet_matrix,
     parse_iso_datetime,
+    sheets_call,
     snapshot_sha256,
     staging_tab_title,
     write_sheet_values,
@@ -49,16 +49,6 @@ VOLATILE_PARTIAL_FIELDS = {
     "配信停止率",
 }
 HYPERLINK_EMAIL_ID_RE = re.compile(r"/details/(\d+)/performance")
-SHEETS_RETRYABLE_MARKERS = (
-    "429",
-    "500",
-    "502",
-    "503",
-    "504",
-    "Quota exceeded",
-    "Read requests per minute",
-    "Write requests per minute",
-)
 
 
 def parse_args() -> argparse.Namespace:
@@ -94,30 +84,8 @@ def parse_hyperlink_email_id(formula_value: str) -> str:
     return match.group(1) if match else ""
 
 
-def is_retryable_sheets_error(error: Exception) -> bool:
-    text = str(error)
-    return any(marker in text for marker in SHEETS_RETRYABLE_MARKERS)
-
-
 def run_sheets_call(label: str, func, attempts: int = 4, retry_sleep_seconds: int = 70):
-    last_error: Exception | None = None
-    for attempt in range(1, attempts + 1):
-        try:
-            return func()
-        except Exception as error:
-            last_error = error
-            if not is_retryable_sheets_error(error) or attempt >= attempts:
-                raise
-            sleep_seconds = retry_sleep_seconds * attempt
-            print(
-                f"sheets_retry label={label} attempt={attempt}/{attempts} "
-                f"sleep_seconds={sleep_seconds} error={type(error).__name__}: {error}",
-                flush=True,
-            )
-            time.sleep(sleep_seconds)
-    if last_error:
-        raise last_error
-    raise RuntimeError(f"Sheets call failed without an exception: {label}")
+    return sheets_call(label, func, attempts=attempts, retry_sleep_seconds=retry_sleep_seconds)
 
 
 def quote_sheet_title(title: str) -> str:

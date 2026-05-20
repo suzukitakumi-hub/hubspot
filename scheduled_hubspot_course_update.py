@@ -10,7 +10,7 @@ import sys
 import time
 from pathlib import Path
 
-from hubspot_course_sheet_guardrails import DEFAULT_SPREADSHEET_ID, JST
+from hubspot_course_sheet_guardrails import DEFAULT_SPREADSHEET_ID, JST, retry_sleep_seconds_for_attempt
 
 
 def parse_args() -> argparse.Namespace:
@@ -105,9 +105,17 @@ def run_logged(command: list[str], log_file: Path, attempts: int = 1, retry_slee
         if completed.returncode == 0:
             return
         if attempt < attempts:
-            sleep_seconds = retry_sleep_seconds * attempt
+            sleep_seconds = retry_sleep_seconds_for_attempt(
+                attempt,
+                retry_sleep_seconds,
+                max_sleep_seconds=300,
+                jitter_seconds=3,
+            )
             with log_file.open("a", encoding="utf-8") as handle:
-                handle.write(f"retrying_command attempt={attempt}/{attempts} sleep_seconds={sleep_seconds} returncode={completed.returncode}\n")
+                handle.write(
+                    f"retrying_command attempt={attempt}/{attempts} "
+                    f"sleep_seconds={sleep_seconds:.1f} returncode={completed.returncode}\n"
+                )
             time.sleep(sleep_seconds)
     raise subprocess.CalledProcessError(last_returncode, command)
 
@@ -139,11 +147,16 @@ def run_audit_until_clean(
         if issue_count == 0 or attempt >= attempts:
             return audit
 
-        sleep_seconds = retry_sleep_seconds * attempt
+        sleep_seconds = retry_sleep_seconds_for_attempt(
+            attempt,
+            retry_sleep_seconds,
+            max_sleep_seconds=300,
+            jitter_seconds=3,
+        )
         with log_file.open("a", encoding="utf-8") as handle:
             handle.write(
                 f"retrying_live_audit_for_reported_issues "
-                f"attempt={attempt}/{attempts} sleep_seconds={sleep_seconds} issue_count={issue_count}\n"
+                f"attempt={attempt}/{attempts} sleep_seconds={sleep_seconds:.1f} issue_count={issue_count}\n"
             )
         time.sleep(sleep_seconds)
     return read_json(audit_report)

@@ -15,6 +15,7 @@ from hubspot_course_sheet_guardrails import (
     DEFAULT_VALIDATION_REPORT_MAX_AGE_MINUTES,
     derive_ga4_map_manifest_path,
     derive_validation_report_path,
+    retry_sleep_seconds_for_attempt,
 )
 
 
@@ -22,7 +23,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Safely write, validate, and promote the HubSpot course KPI sheet.")
     parser.add_argument("--month", default="2026-03", help="YYYY-MM")
     parser.add_argument("--spreadsheet-id", default=DEFAULT_SPREADSHEET_ID)
-    parser.add_argument("--hubspot-token", default=os.environ.get("HUBSPOT_PAT", ""))
+    parser.add_argument("--hubspot-token", default=os.environ.get("HUBSPOT_PAT", ""), help=argparse.SUPPRESS)
     parser.add_argument(
         "--service-account-json",
         default=os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", DEFAULT_SERVICE_ACCOUNT_JSON),
@@ -85,6 +86,9 @@ def redact_command(command: list[str]) -> str:
             redacted.extend([part, "<redacted>"])
             skip_next = True
             continue
+        if part.startswith("--hubspot-token="):
+            redacted.append("--hubspot-token=<redacted>")
+            continue
         redacted.append(part)
     return " ".join(redacted)
 
@@ -95,6 +99,7 @@ def run_step(
     allowed_exit_codes: tuple[int, ...] = (0,),
     attempts: int = 1,
     retry_sleep_seconds: int = 30,
+    env: dict[str, str] | None = None,
 ) -> int:
     last_returncode = 0
     for attempt in range(1, attempts + 1):
@@ -102,17 +107,22 @@ def run_step(
         print(f"step={name}")
         print(f"attempt={attempt}/{attempts}")
         print("command=" + redact_command(command))
-        completed = subprocess.run(command, check=False)
+        completed = subprocess.run(command, check=False, env=env)
         elapsed = time.perf_counter() - started
         print(f"step_finished={name} attempt={attempt}/{attempts} returncode={completed.returncode} duration_seconds={elapsed:.3f}")
         last_returncode = completed.returncode
         if completed.returncode in allowed_exit_codes:
             return completed.returncode
         if attempt < attempts:
-            sleep_seconds = retry_sleep_seconds * attempt
-            print(f"retrying_step={name} sleep_seconds={sleep_seconds} returncode={completed.returncode}")
+            sleep_seconds = retry_sleep_seconds_for_attempt(
+                attempt,
+                retry_sleep_seconds,
+                max_sleep_seconds=300,
+                jitter_seconds=3,
+            )
+            print(f"retrying_step={name} sleep_seconds={sleep_seconds:.1f} returncode={completed.returncode}")
             time.sleep(sleep_seconds)
-    raise subprocess.CalledProcessError(last_returncode, command)
+    raise subprocess.CalledProcessError(last_returncode, redact_command(command))
 
 
 def sheets_cooldown(label: str, seconds: int) -> None:
@@ -133,13 +143,13 @@ def main() -> None:
     ga4_manifest_path = args.ga4_map_manifest or derive_ga4_map_manifest_path(args.ga4_map_csv)
     validation_report_path = args.validation_report or derive_validation_report_path(args.month)
     source_snapshot_path = args.source_snapshot_json or f"hubspot_course_source_snapshot_{args.month}.json"
+    child_env = os.environ.copy()
+    child_env["HUBSPOT_PAT"] = token
     ga4_map_cmd = [
         sys.executable,
         "map_ga4_cv_to_hubspot_emails.py",
         "--month",
         args.month,
-        "--hubspot-token",
-        token,
         "--service-account-json",
         args.service_account_json,
         "--ga4-property-id",
@@ -152,8 +162,6 @@ def main() -> None:
         args.month,
         "--spreadsheet-id",
         args.spreadsheet_id,
-        "--hubspot-token",
-        token,
         "--service-account-json",
         args.service_account_json,
         "--ga4-map-csv",
@@ -187,8 +195,6 @@ def main() -> None:
         str(args.max_ga4_map_age_minutes),
         "--email-type",
         args.email_type,
-        "--hubspot-token",
-        token,
         "--source-snapshot-json",
         source_snapshot_path,
     ]
@@ -213,8 +219,6 @@ def main() -> None:
         args.email_type,
         "--output",
         validation_report_path,
-        "--hubspot-token",
-        token,
         "--source-snapshot-json",
         source_snapshot_path,
     ]
@@ -234,12 +238,12 @@ def main() -> None:
     ]
 
     if not args.skip_ga4_map_refresh:
-        run_step("build_ga4_map", ga4_map_cmd, attempts=2)
+        run_step("build_ga4_map", ga4_map_cmd, attempts=2, env=child_env)
 
-    run_step("build_source_snapshot", source_snapshot_cmd, attempts=3)
-    run_step("write_staging", writer_cmd, attempts=3)
+    run_step("build_source_snapshot", source_snapshot_cmd, attempts=3, env=child_env)
+    run_step("write_staging", writer_cmd, attempts=3, env=child_env)
     sheets_cooldown("after_write_staging", args.sheets_cooldown_seconds)
-    validate_returncode = run_step("validate_staging", validator_cmd, allowed_exit_codes=(0, 1), attempts=3)
+    validate_returncode = run_step("validate_staging", validator_cmd, allowed_exit_codes=(0, 1), attempts=3, env=child_env)
     if not os.path.exists(validation_report_path):
         raise SystemExit(
             f"Validation report was not created after validate_staging. "
@@ -251,7 +255,7 @@ def main() -> None:
         return
 
     sheets_cooldown("before_promote_live", args.sheets_cooldown_seconds)
-    run_step("promote_live", promote_cmd, attempts=4, retry_sleep_seconds=75)
+    run_step("promote_live", promote_cmd, attempts=4, retry_sleep_seconds=75, env=child_env)
 
 
 if __name__ == "__main__":

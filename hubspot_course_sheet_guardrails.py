@@ -5,6 +5,7 @@ import datetime as dt
 import hashlib
 import json
 import os
+import random
 import re
 import time
 from pathlib import Path
@@ -76,6 +77,8 @@ DEFAULT_VALIDATION_REPORT_MAX_AGE_MINUTES = 30
 DEFAULT_PROVISIONAL_DAYS = 12
 DEFAULT_SHEETS_RETRY_ATTEMPTS = 6
 DEFAULT_SHEETS_RETRY_SLEEP_SECONDS = 70
+DEFAULT_SHEETS_RETRY_MAX_SLEEP_SECONDS = 180
+DEFAULT_SHEETS_RETRY_JITTER_SECONDS = 3
 SHEETS_RETRYABLE_MARKERS = (
     "429",
     "500",
@@ -119,6 +122,49 @@ def is_retryable_sheets_error(error: Exception) -> bool:
     return any(marker in text for marker in SHEETS_RETRYABLE_MARKERS)
 
 
+def retry_after_seconds(error: Exception) -> float | None:
+    response = getattr(error, "response", None)
+    headers = getattr(response, "headers", None)
+    if not headers or not hasattr(headers, "get"):
+        return None
+    raw_value = headers.get("Retry-After") or headers.get("retry-after")
+    if raw_value is None:
+        return None
+    try:
+        return max(0.0, float(raw_value))
+    except (TypeError, ValueError):
+        return None
+
+
+def retry_sleep_seconds_for_attempt(
+    attempt: int,
+    base_sleep_seconds: float,
+    *,
+    max_sleep_seconds: float | None = None,
+    jitter_seconds: float | None = None,
+    retry_after: float | None = None,
+) -> float:
+    base_sleep = max(0.0, float(base_sleep_seconds))
+    max_sleep = (
+        max_sleep_seconds
+        if max_sleep_seconds is not None
+        else env_float("HUBSPOT_COURSE_SHEETS_RETRY_MAX_SLEEP_SECONDS", DEFAULT_SHEETS_RETRY_MAX_SLEEP_SECONDS)
+    )
+    jitter = (
+        jitter_seconds
+        if jitter_seconds is not None
+        else env_float("HUBSPOT_COURSE_SHEETS_RETRY_JITTER_SECONDS", DEFAULT_SHEETS_RETRY_JITTER_SECONDS)
+    )
+    retry_sleep = base_sleep * (2 ** max(0, attempt - 1))
+    if max_sleep and max_sleep > 0:
+        retry_sleep = min(retry_sleep, max_sleep)
+    if retry_after is not None:
+        retry_sleep = max(retry_sleep, retry_after)
+    if jitter and jitter > 0:
+        retry_sleep += random.uniform(0, jitter)
+    return retry_sleep
+
+
 def throttle_sheets_call() -> None:
     interval = env_float("HUBSPOT_COURSE_SHEETS_MIN_INTERVAL_SECONDS", 1.2)
     if interval <= 0:
@@ -151,10 +197,14 @@ def sheets_call(
             last_error = error
             if not is_retryable_sheets_error(error) or attempt >= max_attempts:
                 raise
-            sleep_seconds = base_sleep * attempt
+            sleep_seconds = retry_sleep_seconds_for_attempt(
+                attempt,
+                base_sleep,
+                retry_after=retry_after_seconds(error),
+            )
             print(
                 f"sheets_retry label={label} attempt={attempt}/{max_attempts} "
-                f"sleep_seconds={sleep_seconds} error={type(error).__name__}: {error}",
+                f"sleep_seconds={sleep_seconds:.1f} error={type(error).__name__}: {error}",
                 flush=True,
             )
             time.sleep(sleep_seconds)
