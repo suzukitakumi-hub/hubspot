@@ -8,7 +8,7 @@ Windowsスケジューラー依存を外し、GitHub Actionsで `uscpa_sales_ema
 
 - HubSpot CRMメール活動から開封済みメールを検索
 - `noreply` 送信元を除外
-- `info@abitus.co.jp` またはCPA営業担当メールから送信されたメールのみ対象
+- `info@abitus.co.jp`、CPA営業担当メール、または担当者別 `info+担当者@abitus.co.jp` から送信されたメールのみ対象
 - HubSpotコンタクトの直近Web閲覧から `uscpa` を含むページ閲覧を検索
 - 過去リードリスト `6567` のコンタクトのみ対象
 - `sales_staff_cpa` が対象CPA営業担当の場合のみ通知

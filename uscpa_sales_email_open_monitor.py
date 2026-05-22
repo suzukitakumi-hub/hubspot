@@ -60,13 +60,21 @@ SHEET_HEADERS = [
 
 ALLOWED_SENDERS = {
     "info@abitus.co.jp",
+    "info+takahashi@abitus.co.jp",
     "takahashi.shota@abitus.co.jp",
+    "info+sakai@abitus.co.jp",
     "sakai.moena@abitus.co.jp",
+    "info+iwasaki@abitus.co.jp",
     "iwasaki@abitus.co.jp",
+    "info+nakamura@abitus.co.jp",
     "kanoko.nakamura@abitus.co.jp",
+    "info+hirayama@abitus.co.jp",
     "hirayama@abitus.co.jp",
+    "info+yuki@abitus.co.jp",
     "yuki.ren@abitus.co.jp",
+    "info+sugiyama@abitus.co.jp",
     "sugiyama.runo@abitus.co.jp",
+    "info+morimune@abitus.co.jp",
     "morimune@abitus.co.jp",
 }
 
