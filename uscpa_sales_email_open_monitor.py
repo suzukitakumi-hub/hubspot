@@ -702,41 +702,90 @@ def notification_sheet_row_state(worksheet, notification_id: str) -> tuple[int |
     return None, last_data_row + 1
 
 
-def set_contact_checkbox_validation(worksheet) -> None:
+def checkbox_cell_range(worksheet, start_row: int, end_row: int) -> dict[str, int]:
+    return {
+        "sheetId": worksheet.id,
+        "startRowIndex": start_row - 1,
+        "endRowIndex": end_row,
+        "startColumnIndex": 3,
+        "endColumnIndex": 5,
+    }
+
+
+def contact_checkbox_rule() -> dict[str, Any]:
+    return {
+        "condition": {"type": "BOOLEAN"},
+        "strict": True,
+        "showCustomUi": True,
+    }
+
+
+def contact_checkbox_column_width_request(worksheet) -> dict[str, Any]:
+    return {
+        "updateDimensionProperties": {
+            "range": {
+                "sheetId": worksheet.id,
+                "dimension": "COLUMNS",
+                "startIndex": 3,
+                "endIndex": 5,
+            },
+            "properties": {"pixelSize": 110},
+            "fields": "pixelSize",
+        }
+    }
+
+
+def set_contact_checkbox_validation(worksheet, start_row: int, end_row: int) -> None:
+    if end_row < start_row:
+        return
     worksheet.spreadsheet.batch_update(
         {
             "requests": [
                 {
                     "setDataValidation": {
-                        "range": {
-                            "sheetId": worksheet.id,
-                            "startRowIndex": 1,
-                            "endRowIndex": max(worksheet.row_count, 1000),
-                            "startColumnIndex": 3,
-                            "endColumnIndex": 5,
-                        },
-                        "rule": {
-                            "condition": {"type": "BOOLEAN"},
-                            "strict": True,
-                            "showCustomUi": True,
-                        },
+                        "range": checkbox_cell_range(worksheet, start_row, end_row),
+                        "rule": contact_checkbox_rule(),
                     }
                 },
-                {
-                    "updateDimensionProperties": {
-                        "range": {
-                            "sheetId": worksheet.id,
-                            "dimension": "COLUMNS",
-                            "startIndex": 3,
-                            "endIndex": 5,
-                        },
-                        "properties": {"pixelSize": 110},
-                        "fields": "pixelSize",
-                    }
-                },
+                contact_checkbox_column_width_request(worksheet),
             ]
         }
     )
+
+
+def sync_contact_checkbox_rows(worksheet) -> int:
+    _, next_row = notification_sheet_row_state(worksheet, "")
+    last_data_row = next_row - 1
+    requests: list[dict[str, Any]] = [contact_checkbox_column_width_request(worksheet)]
+    if last_data_row >= 2:
+        requests.append(
+            {
+                "setDataValidation": {
+                    "range": checkbox_cell_range(worksheet, 2, last_data_row),
+                    "rule": contact_checkbox_rule(),
+                }
+            }
+        )
+    if last_data_row < worksheet.row_count:
+        blank_range = checkbox_cell_range(worksheet, last_data_row + 1, worksheet.row_count)
+        requests.extend(
+            [
+                {
+                    "repeatCell": {
+                        "range": blank_range,
+                        "cell": {},
+                        "fields": "userEnteredValue",
+                    }
+                },
+                {
+                    "setDataValidation": {
+                        "range": blank_range,
+                    }
+                },
+            ]
+        )
+    worksheet.spreadsheet.batch_update({"requests": requests})
+    return max(last_data_row - 1, 0)
 
 
 def ensure_worksheet(spreadsheet, title: str):
@@ -775,7 +824,6 @@ def ensure_worksheet(spreadsheet, title: str):
     if current != SHEET_HEADERS:
         worksheet.update(header_range(), [SHEET_HEADERS])
     worksheet.freeze(rows=1)
-    set_contact_checkbox_validation(worksheet)
     return worksheet
 
 
@@ -787,7 +835,8 @@ def setup_sheet_tabs(spreadsheet_id: str | None, service_account_json: str) -> d
     tabs = []
     for owner_name in CPA_OWNER_NAMES.values():
         title = normalize_sheet_title(owner_name.replace(" ", ""))
-        ensure_worksheet(spreadsheet, title)
+        worksheet = ensure_worksheet(spreadsheet, title)
+        sync_contact_checkbox_rows(worksheet)
         tabs.append(title)
     return {
         "spreadsheet_id": spreadsheet_id,
@@ -849,6 +898,7 @@ def append_sheet_row(
         [row],
         value_input_option="USER_ENTERED",
     )
+    set_contact_checkbox_validation(worksheet, target_row, target_row)
     return f"sheet appended:{worksheet.title}:row {target_row}"
 
 
