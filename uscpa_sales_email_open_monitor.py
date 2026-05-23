@@ -680,6 +680,28 @@ def normalized_header(values: list[list[Any]], width: int) -> list[str]:
     return row[:width]
 
 
+def is_effective_sheet_data_row(values: list[Any]) -> bool:
+    """Treat checkbox-only rows as empty for notification appends."""
+    for index, value in enumerate(values):
+        if index in {3, 4}:
+            continue
+        if value not in ("", None):
+            return True
+    return False
+
+
+def notification_sheet_row_state(worksheet, notification_id: str) -> tuple[int | None, int]:
+    values = worksheet.get(f"A1:{column_letter(len(SHEET_HEADERS))}{worksheet.row_count}")
+    last_data_row = 1
+    for row_index, values_row in enumerate(values[1:], start=2):
+        padded = [*values_row, *([""] * (len(SHEET_HEADERS) - len(values_row)))]
+        if notification_id and notification_id in {str(padded[14]), str(padded[15])}:
+            return row_index, row_index
+        if is_effective_sheet_data_row(values_row):
+            last_data_row = row_index
+    return None, last_data_row + 1
+
+
 def set_contact_checkbox_validation(worksheet) -> None:
     worksheet.spreadsheet.batch_update(
         {
@@ -817,8 +839,17 @@ def append_sheet_row(
         f'=HYPERLINK("{related_url}","{notification_id}")' if related_url else "",
         notification_id,
     ]
-    worksheet.append_row(row, value_input_option="USER_ENTERED")
-    return f"sheet appended:{worksheet.title}"
+    existing_row, target_row = notification_sheet_row_state(worksheet, notification_id)
+    if existing_row is not None:
+        return f"sheet already exists:{worksheet.title}:row {existing_row}"
+    if target_row > worksheet.row_count:
+        worksheet.resize(rows=target_row, cols=max(worksheet.col_count, len(SHEET_HEADERS)))
+    worksheet.update(
+        f"A{target_row}:{column_letter(len(SHEET_HEADERS))}{target_row}",
+        [row],
+        value_input_option="USER_ENTERED",
+    )
+    return f"sheet appended:{worksheet.title}:row {target_row}"
 
 
 def validate_runtime_config(args, slack_map: dict[str, str]) -> None:
@@ -942,6 +973,22 @@ def main():
                     row["status"] = "skipped"
                     row["reason"] = "max updates reached"
                 else:
+                    sheet_result = ""
+                    if args.sheet_output:
+                        email_url = f"https://app.hubspot.com/contacts/{PORTAL_ID}/record/0-49/{email_id}"
+                        sheet_result = append_sheet_row(
+                            args.sheet_spreadsheet_id,
+                            args.google_service_account_json,
+                            now,
+                            contact,
+                            "USCPA CRM営業メール開封",
+                            eprops.get("hs_email_subject") or "",
+                            eprops.get("hs_email_from_email") or "",
+                            eprops.get("hs_email_to_email") or "",
+                            str(eprops.get("hs_email_open_count") or ""),
+                            email_url,
+                            email_id,
+                        )
                     slack_result = ""
                     if args.delivery in {"slack", "both"}:
                         slack_result = post_slack_notification(
@@ -952,25 +999,6 @@ def main():
                             args.slack_bot_token,
                             args.slack_webhook_url,
                         )
-                    sheet_result = ""
-                    if args.sheet_output:
-                        try:
-                            email_url = f"https://app.hubspot.com/contacts/{PORTAL_ID}/record/0-49/{email_id}"
-                            sheet_result = append_sheet_row(
-                                args.sheet_spreadsheet_id,
-                                args.google_service_account_json,
-                                now,
-                                contact,
-                                "USCPA CRM営業メール開封",
-                                eprops.get("hs_email_subject") or "",
-                                eprops.get("hs_email_from_email") or "",
-                                eprops.get("hs_email_to_email") or "",
-                                str(eprops.get("hs_email_open_count") or ""),
-                                email_url,
-                                email_id,
-                            )
-                        except Exception as exc:
-                            sheet_result = f"sheet error: {exc}"
                     update_contact_for_notification(
                         client,
                         contact,
@@ -1022,6 +1050,21 @@ def main():
                 row["status"] = "skipped"
                 row["reason"] = "max updates reached"
             else:
+                sheet_result = ""
+                if args.sheet_output:
+                    sheet_result = append_sheet_row(
+                        args.sheet_spreadsheet_id,
+                        args.google_service_account_json,
+                        now,
+                        contact,
+                        "USCPA Webページ閲覧",
+                        cprops.get("hs_analytics_last_timestamp") or "",
+                        page_url,
+                        "",
+                        "",
+                        page_url,
+                        notification_key,
+                    )
                 slack_result = ""
                 if args.delivery in {"slack", "both"}:
                     slack_result = post_web_slack_notification(
@@ -1031,24 +1074,6 @@ def main():
                         args.slack_bot_token,
                         args.slack_webhook_url,
                     )
-                sheet_result = ""
-                if args.sheet_output:
-                    try:
-                        sheet_result = append_sheet_row(
-                            args.sheet_spreadsheet_id,
-                            args.google_service_account_json,
-                            now,
-                            contact,
-                            "USCPA Webページ閲覧",
-                            cprops.get("hs_analytics_last_timestamp") or "",
-                            page_url,
-                            "",
-                            "",
-                            page_url,
-                            notification_key,
-                        )
-                    except Exception as exc:
-                        sheet_result = f"sheet error: {exc}"
                 update_contact_for_notification(
                     client,
                     contact,
