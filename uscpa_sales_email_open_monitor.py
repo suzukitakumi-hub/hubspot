@@ -1,13 +1,15 @@
 import argparse
 import hashlib
+import html
 import json
 import os
+import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import requests
 
@@ -15,6 +17,8 @@ import requests
 BASE_URL = "https://api.hubapi.com"
 PORTAL_ID = "39827439"
 PAST_LEAD_LIST_ID = "6567"
+ATTENDANCE_OBJECT_TYPE = "2-16678867"
+EVENT_OBJECT_TYPE = "2-16619393"
 OUTPUT_DIR = Path("outputs")
 OUTPUT_DIR.mkdir(exist_ok=True)
 
@@ -137,6 +141,31 @@ EMAIL_PROPS = [
     "hs_email_logged_from",
     "hs_timestamp",
     "hs_lastmodifieddate",
+]
+
+ATTENDANCE_PROPS = [
+    "attendance_sw",
+    "date",
+    "event_id",
+    "event_kind_inner",
+    "product",
+    "start_time",
+    "submission_idempotent_id",
+    "hs_createdate",
+    "hs_lastmodifieddate",
+]
+
+EVENT_PROPS = [
+    "date",
+    "event_id",
+    "event_kind",
+    "event_kind_inner",
+    "lp_url",
+    "product",
+    "start_time",
+    "sub_title",
+    "title",
+    "webinar_url",
 ]
 
 
@@ -433,6 +462,239 @@ def shorten_url_label(url: str) -> str:
     return f"{parsed.netloc}{parsed.path}" or url
 
 
+def is_thanks_page_url(url: str | None) -> bool:
+    if not url:
+        return False
+    path = urlparse(url).path.lower().rstrip("/")
+    return path.endswith("_thanks") or path.endswith("/thanks") or "thanks" in path
+
+
+def extract_submission_guid(url: str | None) -> str:
+    if not url:
+        return ""
+    query = parse_qs(urlparse(url).query)
+    for key, values in query.items():
+        if key.lower() == "submissionguid" and values:
+            return values[0]
+    return ""
+
+
+def clean_title(value: str | None) -> str:
+    if not value:
+        return ""
+    return re.sub(r"\s+", " ", html.unescape(value)).strip()
+
+
+def fetch_page_title(url: str, cache: dict[str, str]) -> str:
+    if not url:
+        return ""
+    if url in cache:
+        return cache[url]
+    title = ""
+    try:
+        response = requests.get(
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (compatible; USCPA reactivation monitor; "
+                    "+https://www.abitus.co.jp/)"
+                )
+            },
+            timeout=8,
+            allow_redirects=True,
+        )
+        content_type = response.headers.get("Content-Type", "")
+        if response.status_code < 400 and "html" in content_type.lower():
+            response.encoding = response.encoding or response.apparent_encoding
+            match = re.search(r"<title[^>]*>(.*?)</title>", response.text, flags=re.I | re.S)
+            if match:
+                title = clean_title(match.group(1))
+    except requests.RequestException:
+        title = ""
+    cache[url] = title
+    return title
+
+
+def format_ymd(value: str | None) -> str:
+    if not value:
+        return ""
+    try:
+        return datetime.fromisoformat(value).strftime("%Y/%m/%d")
+    except ValueError:
+        return value
+
+
+def build_event_title(attendance: dict[str, Any] | None, event: dict[str, Any] | None) -> str:
+    attendance_props = (attendance or {}).get("properties", {})
+    event_props = (event or {}).get("properties", {})
+    title = (
+        clean_title(event_props.get("title"))
+        or clean_title(event_props.get("event_kind_inner"))
+        or clean_title(attendance_props.get("event_kind_inner"))
+    )
+    date = format_ymd(event_props.get("date") or attendance_props.get("date"))
+    start_time = event_props.get("start_time") or attendance_props.get("start_time") or ""
+    when = " ".join(part for part in [date, start_time] if part)
+    if title and when:
+        return f"{title}（{when}）"
+    return title or when
+
+
+def build_registration_url(raw_url: str, attendance: dict[str, Any] | None) -> str:
+    if not raw_url:
+        return ""
+    event_id = ((attendance or {}).get("properties") or {}).get("event_id")
+    parsed = urlparse(raw_url)
+    path = parsed.path
+    lower_path = path.lower()
+    if "seminar_thanks" in lower_path:
+        path = re.sub("seminar_thanks", "seminar_input", path, flags=re.I)
+    elif "counseling_thanks" in lower_path:
+        path = re.sub("counseling_thanks", "counseling", path, flags=re.I)
+    elif "request_thanks" in lower_path:
+        path = re.sub("request_thanks", "request", path, flags=re.I)
+    else:
+        path = re.sub("_thanks", "_input", path, flags=re.I)
+    query: dict[str, str] = {}
+    if event_id:
+        query["event_id"] = str(event_id)
+    if "/uscpa/" in path.lower():
+        query["program"] = "USCPA"
+    return urlunparse((parsed.scheme, parsed.netloc, path, "", urlencode(query), ""))
+
+
+class WebPageContextResolver:
+    def __init__(self, client: HubSpot) -> None:
+        self.client = client
+        self.title_cache: dict[str, str] = {}
+        self.association_cache: dict[tuple[str, str, str], list[str]] = {}
+        self.object_cache: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def associated_ids(self, from_type: str, from_id: str, to_type: str) -> list[str]:
+        cache_key = (from_type, from_id, to_type)
+        if cache_key in self.association_cache:
+            return self.association_cache[cache_key]
+        ids: list[str] = []
+        after = None
+        while True:
+            params: dict[str, Any] = {"limit": 100}
+            if after:
+                params["after"] = after
+            data = self.client.request(
+                "GET",
+                f"/crm/v4/objects/{from_type}/{from_id}/associations/{to_type}",
+                params=params,
+            )
+            ids.extend(str(row["toObjectId"]) for row in data.get("results", []))
+            after = data.get("paging", {}).get("next", {}).get("after")
+            if not after:
+                break
+        self.association_cache[cache_key] = ids
+        return ids
+
+    def read_object(self, object_type: str, object_id: str, properties: list[str]) -> dict[str, Any]:
+        cache_key = (object_type, object_id)
+        if cache_key in self.object_cache:
+            return self.object_cache[cache_key]
+        data = self.client.request(
+            "GET",
+            f"/crm/v3/objects/{object_type}/{object_id}",
+            params={"properties": ",".join(properties)},
+        )
+        self.object_cache[cache_key] = data
+        return data
+
+    def search_event_by_event_id(self, event_id: str | None) -> dict[str, Any] | None:
+        if not event_id:
+            return None
+        data = self.client.request(
+            "POST",
+            f"/crm/v3/objects/{EVENT_OBJECT_TYPE}/search",
+            json={
+                "filterGroups": [
+                    {
+                        "filters": [
+                            {
+                                "propertyName": "event_id",
+                                "operator": "EQ",
+                                "value": str(event_id),
+                            }
+                        ]
+                    }
+                ],
+                "properties": EVENT_PROPS,
+                "limit": 1,
+            },
+        )
+        results = data.get("results", [])
+        return results[0] if results else None
+
+    def find_attendance(self, contact_id: str, submission_guid: str) -> dict[str, Any] | None:
+        attendance_ids = self.associated_ids("contacts", contact_id, ATTENDANCE_OBJECT_TYPE)
+        attendance_records = [
+            self.read_object(ATTENDANCE_OBJECT_TYPE, attendance_id, ATTENDANCE_PROPS)
+            for attendance_id in attendance_ids
+        ]
+        if submission_guid:
+            for attendance in attendance_records:
+                if (
+                    attendance.get("properties", {}).get("submission_idempotent_id")
+                    == submission_guid
+                ):
+                    return attendance
+        return None
+
+    def event_for_attendance(self, attendance: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not attendance:
+            return None
+        attendance_id = str(attendance["id"])
+        event_ids = self.associated_ids(
+            ATTENDANCE_OBJECT_TYPE,
+            attendance_id,
+            EVENT_OBJECT_TYPE,
+        )
+        if event_ids:
+            return self.read_object(EVENT_OBJECT_TYPE, event_ids[0], EVENT_PROPS)
+        return self.search_event_by_event_id(attendance.get("properties", {}).get("event_id"))
+
+    def resolve(self, contact: dict[str, Any]) -> dict[str, str]:
+        cprops = contact.get("properties", {})
+        raw_url = cprops.get("hs_analytics_last_url") or ""
+        context = {
+            "raw_url": raw_url,
+            "display_url": raw_url,
+            "page_title": "",
+            "source": "hs_analytics_last_url",
+            "attendance_id": "",
+            "event_record_id": "",
+            "event_id": "",
+        }
+        if not raw_url:
+            return context
+
+        if is_thanks_page_url(raw_url):
+            submission_guid = extract_submission_guid(raw_url)
+            attendance = self.find_attendance(str(contact.get("id")), submission_guid)
+            event = self.event_for_attendance(attendance)
+            event_title = build_event_title(attendance, event)
+            attendance_props = (attendance or {}).get("properties", {})
+            event_props = (event or {}).get("properties", {})
+            display_url = event_props.get("lp_url") or build_registration_url(raw_url, attendance)
+            if display_url:
+                context["display_url"] = display_url
+            if event_title:
+                context["page_title"] = event_title
+            context["source"] = "event_attendance" if attendance else "thanks_url"
+            context["attendance_id"] = str((attendance or {}).get("id") or "")
+            context["event_record_id"] = str((event or {}).get("id") or "")
+            context["event_id"] = str(event_props.get("event_id") or attendance_props.get("event_id") or "")
+
+        if not context["page_title"]:
+            context["page_title"] = fetch_page_title(context["display_url"], self.title_cache)
+
+        return context
+
+
 def should_skip_web_contact(contact: dict[str, Any]) -> str | None:
     props = contact.get("properties", {})
     url = props.get("hs_analytics_last_url")
@@ -556,28 +818,39 @@ def build_email_slack_text(contact: dict[str, Any], email_obj: dict[str, Any], m
     )
 
 
-def build_web_slack_text(contact: dict[str, Any], mention: str) -> str:
+def build_web_slack_text(
+    contact: dict[str, Any],
+    mention: str,
+    web_context: dict[str, str] | None = None,
+) -> str:
     cprops = contact.get("properties", {})
+    web_context = web_context or {}
     contact_id = str(contact.get("id"))
     contact_name = f"{cprops.get('lastname') or ''} {cprops.get('firstname') or ''}".strip()
     contact_url = f"https://app.hubspot.com/contacts/{PORTAL_ID}/contact/{contact_id}"
-    page_url = cprops.get("hs_analytics_last_url") or ""
+    page_url = web_context.get("display_url") or cprops.get("hs_analytics_last_url") or ""
+    page_title = web_context.get("page_title") or ""
     linked_contact_name = f"<{contact_url}|{contact_name or contact_id}>"
     linked_page = f"<{page_url}|{shorten_url_label(page_url)}>" if page_url else ""
-    return "\n".join(
+    lines = [
+        "過去リードが再行動しました",
+        "",
+        f"担当者: {mention}".strip(),
+        "行動: USCPA Webページ閲覧",
+        f"顧客名: {linked_contact_name}",
+        f"メール: {cprops.get('email') or ''}",
+        f"ヨミ: {cprops.get('yomi') or ''}",
+        f"前回接触: {cprops.get('notes_last_contacted') or ''}",
+    ]
+    if page_title:
+        lines.append(f"ページタイトル: {page_title}")
+    lines.extend(
         [
-            "過去リードが再行動しました",
-            "",
-            f"担当者: {mention}".strip(),
-            "行動: USCPA Webページ閲覧",
-            f"顧客名: {linked_contact_name}",
-            f"メール: {cprops.get('email') or ''}",
-            f"ヨミ: {cprops.get('yomi') or ''}",
-            f"前回接触: {cprops.get('notes_last_contacted') or ''}",
             f"ページURL: {linked_page}",
             f"閲覧日時: {cprops.get('hs_analytics_last_timestamp') or ''}",
         ]
     )
+    return "\n".join(lines)
 
 
 def post_slack_notification(
@@ -615,6 +888,7 @@ def post_slack_notification(
 
 def post_web_slack_notification(
     contact: dict[str, Any],
+    web_context: dict[str, str],
     slack_map: dict[str, str],
     channel_id: str,
     bot_token: str | None,
@@ -624,7 +898,7 @@ def post_web_slack_notification(
     mention = slack_map.get(owner_id, "")
     if not mention:
         raise RuntimeError(f"Slack mention missing for owner_id={owner_id}")
-    text = build_web_slack_text(contact, mention)
+    text = build_web_slack_text(contact, mention, web_context)
     if bot_token:
         data = slack_api_request(
             bot_token,
@@ -1071,6 +1345,7 @@ def main():
     if not args.disable_web:
         web_contacts = search_recent_web_contacts(client, since_ms, args.limit_web_contacts)
 
+    web_context_resolver = WebPageContextResolver(client)
     for contact in web_contacts:
         contact_id = str(contact.get("id"))
         cprops = contact.get("properties", {})
@@ -1080,6 +1355,21 @@ def main():
             contact, notification_key, past_member_ids, now, args.suppression_days
         )
         page_url = cprops.get("hs_analytics_last_url") or ""
+        web_context = (
+            web_context_resolver.resolve(contact)
+            if reason is None
+            else {
+                "raw_url": page_url,
+                "display_url": page_url,
+                "page_title": "",
+                "source": "skipped",
+                "attendance_id": "",
+                "event_record_id": "",
+                "event_id": "",
+            }
+        )
+        display_url = web_context.get("display_url") or page_url
+        page_title = web_context.get("page_title") or ""
         row = {
             "action": "web_view",
             "notification_key": notification_key,
@@ -1088,6 +1378,12 @@ def main():
             "status": "eligible" if reason is None else "skipped",
             "reason": reason or "",
             "page_url": page_url,
+            "display_page_url": display_url,
+            "page_title": page_title,
+            "page_context_source": web_context.get("source") or "",
+            "attendance_id": web_context.get("attendance_id") or "",
+            "event_record_id": web_context.get("event_record_id") or "",
+            "event_id": web_context.get("event_id") or "",
             "page_timestamp": cprops.get("hs_analytics_last_timestamp"),
             "contact_email": cprops.get("email"),
             "contact_name": f"{cprops.get('lastname') or ''} {cprops.get('firstname') or ''}".strip(),
@@ -1108,8 +1404,8 @@ def main():
                         now,
                         contact,
                         "USCPA Webページ閲覧",
-                        cprops.get("hs_analytics_last_timestamp") or "",
-                        page_url,
+                        page_title or cprops.get("hs_analytics_last_timestamp") or "",
+                        display_url,
                         "",
                         "",
                         page_url,
@@ -1119,6 +1415,7 @@ def main():
                 if args.delivery in {"slack", "both"}:
                     slack_result = post_web_slack_notification(
                         contact,
+                        web_context,
                         slack_map,
                         args.slack_channel_id,
                         args.slack_bot_token,
@@ -1129,8 +1426,8 @@ def main():
                     contact,
                     notification_key,
                     "USCPA Webページ閲覧",
-                    cprops.get("hs_analytics_last_timestamp") or "",
-                    page_url,
+                    page_title or cprops.get("hs_analytics_last_timestamp") or "",
+                    display_url,
                     slack_map,
                     now,
                     trigger_hubspot_workflow=args.delivery in {"hubspot", "both"},
