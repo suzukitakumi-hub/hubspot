@@ -21,6 +21,8 @@ ATTENDANCE_OBJECT_TYPE = "2-16678867"
 EVENT_OBJECT_TYPE = "2-16619393"
 OUTPUT_DIR = Path("outputs")
 OUTPUT_DIR.mkdir(exist_ok=True)
+SLACK_API_MAX_ATTEMPTS = 4
+SLACK_API_TIMEOUT_SECONDS = 20
 
 CONTACT_CHECK_HEADERS = [
     "営業接触済み",
@@ -758,18 +760,96 @@ def update_contact_for_notification(
     return client.request("PATCH", f"/crm/v3/objects/contacts/{contact_id}", json=payload)
 
 
-def slack_api_request(token: str, method: str, payload: dict[str, Any]):
-    response = requests.post(
-        f"https://slack.com/api/{method}",
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        json=payload,
-        timeout=30,
-    )
-    response.raise_for_status()
-    data = response.json()
-    if not data.get("ok"):
-        raise RuntimeError(f"Slack API {method} failed: {data}")
-    return data
+def slack_retry_delay(attempt: int, response: requests.Response | None = None) -> float:
+    if response is not None and response.status_code == 429:
+        retry_after = response.headers.get("Retry-After")
+        if retry_after:
+            try:
+                return max(1.0, float(retry_after))
+            except ValueError:
+                pass
+    return float(2**attempt)
+
+
+def slack_api_request(
+    token: str,
+    method: str,
+    payload: dict[str, Any] | None = None,
+    *,
+    http_method: str = "POST",
+    params: dict[str, Any] | None = None,
+):
+    url = f"https://slack.com/api/{method}"
+    headers = {"Authorization": f"Bearer {token}"}
+    if http_method.upper() == "POST":
+        headers["Content-Type"] = "application/json"
+    last_error: Exception | None = None
+    for attempt in range(SLACK_API_MAX_ATTEMPTS):
+        response: requests.Response | None = None
+        try:
+            if http_method.upper() == "GET":
+                response = requests.get(
+                    url,
+                    headers=headers,
+                    params=params,
+                    timeout=SLACK_API_TIMEOUT_SECONDS,
+                )
+            else:
+                response = requests.post(
+                    url,
+                    headers=headers,
+                    json=payload,
+                    timeout=SLACK_API_TIMEOUT_SECONDS,
+                )
+            if response.status_code in (429, 500, 502, 503, 504):
+                if attempt < SLACK_API_MAX_ATTEMPTS - 1:
+                    time.sleep(slack_retry_delay(attempt, response))
+                    continue
+            response.raise_for_status()
+            data = response.json()
+            if not data.get("ok"):
+                raise RuntimeError(f"Slack API {method} failed: {data}")
+            return data
+        except requests.RequestException as exc:
+            last_error = exc
+            if attempt < SLACK_API_MAX_ATTEMPTS - 1:
+                time.sleep(slack_retry_delay(attempt, response))
+                continue
+            raise RuntimeError(f"Slack API {method} request failed after retries: {exc}") from exc
+    if last_error:
+        raise RuntimeError(f"Slack API {method} request failed after retries: {last_error}")
+    raise RuntimeError(f"Slack API {method} request failed after retries")
+
+
+def owner_slack_display(owner_id: str, slack_map: dict[str, str]) -> str:
+    return slack_map.get(owner_id) or CPA_OWNER_NAMES.get(owner_id, owner_id)
+
+
+def slack_api_post_webhook(webhook_url: str, payload: dict[str, Any]) -> requests.Response:
+    last_error: Exception | None = None
+    for attempt in range(SLACK_API_MAX_ATTEMPTS):
+        response: requests.Response | None = None
+        try:
+            response = requests.post(
+                webhook_url,
+                json=payload,
+                timeout=SLACK_API_TIMEOUT_SECONDS,
+            )
+            if response.status_code in (429, 500, 502, 503, 504):
+                if attempt < SLACK_API_MAX_ATTEMPTS - 1:
+                    time.sleep(slack_retry_delay(attempt, response))
+                    continue
+            response.raise_for_status()
+            return response
+        except requests.RequestException as exc:
+            last_error = exc
+            if attempt < SLACK_API_MAX_ATTEMPTS - 1:
+                time.sleep(slack_retry_delay(attempt, response))
+                continue
+            raise RuntimeError(f"Slack webhook request failed after retries: {exc}") from exc
+    if last_error:
+        raise RuntimeError(f"Slack webhook request failed after retries: {last_error}")
+    raise RuntimeError("Slack webhook request failed after retries")
 
 
 def lookup_slack_mentions_by_email(token: str, existing_map: dict[str, str]) -> dict[str, str]:
@@ -777,14 +857,20 @@ def lookup_slack_mentions_by_email(token: str, existing_map: dict[str, str]) -> 
     for owner_id, email in CPA_OWNER_EMAILS.items():
         if owner_id in slack_map and slack_map[owner_id]:
             continue
-        response = requests.get(
-            "https://slack.com/api/users.lookupByEmail",
-            headers={"Authorization": f"Bearer {token}"},
-            params={"email": email},
-            timeout=30,
-        )
-        response.raise_for_status()
-        data = response.json()
+        try:
+            data = slack_api_request(
+                token,
+                "users.lookupByEmail",
+                http_method="GET",
+                params={"email": email},
+            )
+        except RuntimeError as exc:
+            print(
+                "WARNING: Slack mention lookup skipped for "
+                f"{CPA_OWNER_NAMES.get(owner_id, owner_id)} ({email}): {exc}",
+                file=sys.stderr,
+            )
+            continue
         if data.get("ok") and data.get("user", {}).get("id"):
             slack_map[owner_id] = f"<@{data['user']['id']}>"
     return slack_map
@@ -862,9 +948,7 @@ def post_slack_notification(
     webhook_url: str | None,
 ) -> str:
     owner_id = str(contact.get("properties", {}).get("sales_staff_cpa") or "")
-    mention = slack_map.get(owner_id, "")
-    if not mention:
-        raise RuntimeError(f"Slack mention missing for owner_id={owner_id}")
+    mention = owner_slack_display(owner_id, slack_map)
     text = build_email_slack_text(contact, email_obj, mention)
     if bot_token:
         data = slack_api_request(
@@ -874,12 +958,10 @@ def post_slack_notification(
         )
         return f"chat.postMessage:{data.get('ts')}"
     if webhook_url:
-        response = requests.post(
+        response = slack_api_post_webhook(
             webhook_url,
-            json={"text": text, "mrkdwn": True, "unfurl_links": False},
-            timeout=30,
+            {"text": text, "mrkdwn": True, "unfurl_links": False},
         )
-        response.raise_for_status()
         if response.text.strip().lower() != "ok":
             raise RuntimeError(f"Slack webhook failed: {response.status_code} {response.text[:500]}")
         return "incoming_webhook:ok"
@@ -895,9 +977,7 @@ def post_web_slack_notification(
     webhook_url: str | None,
 ) -> str:
     owner_id = str(contact.get("properties", {}).get("sales_staff_cpa") or "")
-    mention = slack_map.get(owner_id, "")
-    if not mention:
-        raise RuntimeError(f"Slack mention missing for owner_id={owner_id}")
+    mention = owner_slack_display(owner_id, slack_map)
     text = build_web_slack_text(contact, mention, web_context)
     if bot_token:
         data = slack_api_request(
@@ -907,12 +987,10 @@ def post_web_slack_notification(
         )
         return f"chat.postMessage:{data.get('ts')}"
     if webhook_url:
-        response = requests.post(
+        response = slack_api_post_webhook(
             webhook_url,
-            json={"text": text, "mrkdwn": True, "unfurl_links": False},
-            timeout=30,
+            {"text": text, "mrkdwn": True, "unfurl_links": False},
         )
-        response.raise_for_status()
         if response.text.strip().lower() != "ok":
             raise RuntimeError(f"Slack webhook failed: {response.status_code} {response.text[:500]}")
         return "incoming_webhook:ok"
@@ -1188,10 +1266,10 @@ def validate_runtime_config(args, slack_map: dict[str, str]) -> None:
             if not slack_map.get(owner_id)
         ]
         if missing:
-            raise RuntimeError(
-                "Slack mentions are missing for CPA owners: "
-                + ", ".join(missing)
-                + ". Check SLACK_BOT_TOKEN users:read.email scope or USCPA_SLACK_USER_MAP_JSON."
+            print(
+                "WARNING: Slack mentions are missing; owner names will be used instead: "
+                + ", ".join(missing),
+                file=sys.stderr,
             )
 
     if args.sheet_output or args.sheet_setup_only:
