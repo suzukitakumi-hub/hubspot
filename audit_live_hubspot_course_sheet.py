@@ -301,6 +301,21 @@ def main() -> None:
             live_email_ids.append(email_id)
             checked_rows += 1
             ctx = source_contexts[email_id]
+            expected_course = str(ctx.get("course", "")).strip()
+            if expected_course and expected_course != course:
+                issue = {
+                    "code": "course_tab_mismatch",
+                    "course": course,
+                    "expected_course": expected_course,
+                    "sheet_row": row_idx + 1,
+                    "email_id": email_id,
+                    "email_name": ctx["email_name"],
+                    "message": "Live row is placed in a different course tab from the source course.",
+                }
+                issues.append(issue)
+                issue_counter[issue["code"]] += 1
+                per_course_issue_counts[course][issue["code"]] += 1
+                continue
 
             expected_fields = {
                 "送付日": ctx["send_date_text"],
@@ -328,6 +343,22 @@ def main() -> None:
                 "クリックスルー率": strip_literal_prefix(display("クリックスルー率")),
                 "配信停止率": strip_literal_prefix(display("配信停止率")),
             }
+            if actual_fields["クリック率"] and "%" not in str(actual_fields["クリック率"]):
+                issue = {
+                    "code": "click_rate_display_format_mismatch",
+                    "field": "クリック率",
+                    "course": course,
+                    "sheet_row": row_idx + 1,
+                    "email_id": email_id,
+                    "email_name": ctx["email_name"],
+                    "actual": actual_fields["クリック率"],
+                    "expected": expected_fields["クリック率"],
+                    "message": "Click rate is displayed without a percent sign.",
+                }
+                issues.append(issue)
+                issue_counter[issue["code"]] += 1
+                field_counter["クリック率"] += 1
+                per_course_issue_counts[course][issue["code"]] += 1
 
             for field_name, actual_value in actual_fields.items():
                 expected_value = expected_fields[field_name]
@@ -413,7 +444,7 @@ def main() -> None:
                         issue_counter[issue["code"]] += 1
                         per_course_issue_counts[course][issue["code"]] += 1
 
-        missing_live_ids = sorted(set(source_ids_by_course[course]) - set(live_email_ids))
+        missing_live_ids = sorted(set(source_ids_by_course.get(course, [])) - set(live_email_ids))
         for email_id in missing_live_ids:
             issue = {
                 "code": "missing_live_row",

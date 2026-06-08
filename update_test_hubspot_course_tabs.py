@@ -176,51 +176,58 @@ def as_literal_text(value: str) -> str:
     return "'" + v
 
 
+def course_alias_matches(normalized_text: str, alias: str) -> bool:
+    normalized_alias = (alias or "").upper()
+    if not normalized_alias:
+        return False
+    if re.fullmatch(r"[A-Z0-9.]+", normalized_alias):
+        return re.search(rf"(?<![A-Z0-9]){re.escape(normalized_alias)}(?![A-Z0-9])", normalized_text) is not None
+    return normalized_alias in normalized_text
+
+
 def detect_course_candidates(text: str, alias_map: Dict[str, List[str]]) -> List[str]:
     normalized = (text or "").upper()
     hits: List[str] = []
     for course, aliases in alias_map.items():
-        if any(alias.upper() in normalized for alias in aliases):
+        if any(course_alias_matches(normalized, alias) for alias in aliases):
             hits.append(course)
     return hits
 
 
+def detect_explicit_course(email_name: str, subject: str = "") -> str:
+    email_hits = detect_course_candidates(email_name, COURSE_LIST_ALIASES)
+    if len(email_hits) == 1:
+        return email_hits[0]
+    if (email_name or "").upper().startswith(SUBJECT_COURSE_FALLBACK_BLOCK_PREFIXES):
+        return ""
+    subject_hits = detect_course_candidates(subject, COURSE_LIST_ALIASES)
+    if len(subject_hits) == 1:
+        return subject_hits[0]
+    return ""
+
+
 def detect_course(email_name: str, list_names: List[str], subject: str = "") -> str:
+    explicit_course = detect_explicit_course(email_name, subject)
+    if explicit_course:
+        return explicit_course
+
     list_hits = detect_course_candidates(" | ".join(list_names), COURSE_LIST_ALIASES)
     if len(list_hits) == 1:
         return list_hits[0]
     if len(list_hits) > 1:
-        email_hits = detect_course_candidates(email_name, {course: [course] for course in TARGET_COURSES})
-        if len(email_hits) == 1:
-            return email_hits[0]
-        if (email_name or "").upper().startswith(SUBJECT_COURSE_FALLBACK_BLOCK_PREFIXES):
-            return ""
-        subject_hits = detect_course_candidates(subject, {course: [course] for course in TARGET_COURSES})
-        if len(subject_hits) == 1:
-            return subject_hits[0]
         return list_hits[0]
 
-    name = (email_name or "").upper()
-    for c in TARGET_COURSES:
-        if c in name:
-            return c
-    if name.startswith(SUBJECT_COURSE_FALLBACK_BLOCK_PREFIXES):
-        return ""
-    subject_upper = (subject or "").upper()
-    for c in TARGET_COURSES:
-        if c in subject_upper:
-            return c
     return ""
 
 
 def detect_course_for_unregistered(email_name: str, list_names: List[str], subject: str = "") -> str:
+    explicit_course = detect_explicit_course(email_name, subject)
+    if explicit_course:
+        return explicit_course
+
     list_hits = detect_course_candidates(" | ".join(list_names), COURSE_LIST_ALIASES)
     if len(list_hits) == 1:
         return list_hits[0]
-
-    email_hits = detect_course_candidates(email_name, {course: [course] for course in TARGET_COURSES})
-    if len(email_hits) == 1:
-        return email_hits[0]
 
     combined = " | ".join([email_name or "", " | ".join(list_names)]).upper()
     if "FAR" in combined:

@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import time
 
 from hubspot_course_sheet_guardrails import (
     COURSE_SHEET_HEADER,
@@ -15,11 +16,12 @@ from hubspot_course_sheet_guardrails import (
     REVIEW_HUBSPOT_ONLY_SHEET,
     REVIEW_MASTER_UNMATCHED_SHEET,
     TARGET_COURSES,
+    as_sheet_literal_text,
     derive_validation_report_path,
     header_matches_expected,
     load_json,
-    now_jst,
     normalize_month_value,
+    now_jst,
     normalize_sheet_matrix,
     parse_iso_datetime,
     sheets_call,
@@ -49,6 +51,16 @@ VOLATILE_PARTIAL_FIELDS = {
     "配信停止率",
 }
 HYPERLINK_EMAIL_ID_RE = re.compile(r"/details/(\d+)/performance")
+SHEETS_RETRYABLE_MARKERS = (
+    "429",
+    "500",
+    "502",
+    "503",
+    "504",
+    "Quota exceeded",
+    "Read requests per minute",
+    "Write requests per minute",
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -139,20 +151,6 @@ def batch_get_matrices(spreadsheet, worksheets_by_title: dict, titles: list[str]
             values = value_ranges[index].get("values") or []
         out[title] = normalize_sheet_matrix(values)
     return out
-
-
-def preformat_live_value_columns(worksheet) -> None:
-    run_sheets_call(
-        f"preformat_value_columns:{worksheet.title}",
-        lambda: worksheet.batch_format(
-            [
-                {"range": "A:A", "format": {"numberFormat": {"type": "TEXT"}}},
-                {"range": "C:C", "format": {"numberFormat": {"type": "TEXT"}}},
-                {"range": f"O:{COURSE_SHEET_LAST_COLUMN}", "format": {"numberFormat": {"type": "TEXT"}}},
-            ]
-        ),
-    )
-
 
 def collect_blocked_email_ids(report: dict) -> tuple[str, set[str]]:
     issues = report.get("issues", []) or []
@@ -410,6 +408,64 @@ def delete_worksheet_if_exists(spreadsheet, worksheets_by_title: dict, title: st
     worksheets_by_title.pop(title, None)
 
 
+def preformat_live_value_columns(worksheet) -> None:
+    run_sheets_call(
+        f"preformat_value_columns:{worksheet.title}",
+        lambda worksheet=worksheet: worksheet.batch_format(
+            [
+                {"range": "A:C", "format": {"numberFormat": {"type": "TEXT"}}},
+                {"range": "D:H", "format": {"numberFormat": {"type": "NUMBER", "pattern": "0"}}},
+                {"range": "I:J", "format": {"numberFormat": {"type": "TEXT"}}},
+                {"range": "K:K", "format": {"numberFormat": {"type": "PERCENT", "pattern": "0.00%"}}},
+                {"range": "L:M", "format": {"numberFormat": {"type": "TEXT"}}},
+                {"range": "N:N", "format": {"numberFormat": {"type": "NUMBER", "pattern": "0"}}},
+                {"range": f"O:{COURSE_SHEET_LAST_COLUMN}", "format": {"numberFormat": {"type": "TEXT"}}},
+            ]
+        ),
+    )
+
+
+def normalize_click_rate_for_write(row: list[str], click_rate_idx: int) -> list[str]:
+    out = list(row)
+    if click_rate_idx >= len(out):
+        return out
+    raw = str(out[click_rate_idx] or "").strip()
+    if not raw or "%" in raw:
+        return out
+    try:
+        decimal_value = float(raw.replace(",", ""))
+    except ValueError:
+        return out
+    out[click_rate_idx] = f"{decimal_value * 100:.2f}%"
+    return out
+
+
+def prepare_live_row_for_write(row: list[str], header_index: dict[str, int], target_month: str) -> list[str]:
+    out = normalize_click_rate_for_write(row, header_index["クリック率"])
+    text_fields = [
+        "送付日",
+        "メール内部名",
+        "開封率（bot除外）",
+        "開封率（bot含む）",
+        "クリックスルー率",
+        "配信停止率",
+        "CV内訳",
+        "送付リスト",
+        "INTERNAL HUBSPOT IDS",
+        "対象月",
+        "講座",
+    ]
+    for field in text_fields:
+        idx = header_index[field]
+        if idx >= len(out) or out[idx] == "":
+            continue
+        value = normalize_month_value(out[idx]) if field == "対象月" else out[idx]
+        if field == "対象月" and not value:
+            value = target_month
+        out[idx] = as_sheet_literal_text(value)
+    return out
+
+
 def main() -> None:
     args = parse_args()
     if not os.path.exists(args.service_account_json):
@@ -509,7 +565,10 @@ def main() -> None:
                     cols=max(live_ws.col_count, required_cols),
                 ),
             )
-        output_values = [values[0]] + merged_rows
+        output_values = [values[0]] + [
+            prepare_live_row_for_write(row, header_index, args.month)
+            for row in merged_rows
+        ]
         preformat_live_value_columns(live_ws)
         run_sheets_call(
             f"write_sheet_values:{course}",

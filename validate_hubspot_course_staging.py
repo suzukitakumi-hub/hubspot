@@ -121,6 +121,27 @@ def parse_sheet_int(value: str) -> int:
     return int(float(text))
 
 
+def current_provisional_rows(source_contexts: Dict[str, dict], provisional_days: int) -> List[dict]:
+    if provisional_days < 0:
+        return []
+    provisional_cutoff = now_jst() - dt.timedelta(days=provisional_days)
+    rows: List[dict] = []
+    for email_id, context in source_contexts.items():
+        send_dt = context.get("send_dt")
+        if not send_dt or send_dt <= provisional_cutoff:
+            continue
+        rows.append(
+            {
+                "email_id": email_id,
+                "course": context["course"],
+                "email_name": context["email_name"],
+                "send_date": context["send_date_text"],
+            }
+        )
+    rows.sort(key=lambda row: (row["send_date"], row["course"], row["email_id"]))
+    return rows
+
+
 def rate_pct_2dp_text_for_validation(num: float, den: float) -> str:
     if den <= 0:
         return "0.00%"
@@ -747,6 +768,7 @@ def main() -> None:
             provisional_days=args.provisional_days,
             service_account_json=args.service_account_json,
         )
+    provisional_rows = current_provisional_rows(source_contexts, args.provisional_days)
 
     relevant_source_ids = set(source_contexts.keys())
     ga4_missing_rows = sorted(

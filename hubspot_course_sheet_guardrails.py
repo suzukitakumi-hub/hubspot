@@ -251,6 +251,13 @@ def strip_literal_prefix(value: Any) -> str:
     return text[1:] if text.startswith("'") else text
 
 
+def as_sheet_literal_text(value: Any) -> str:
+    text = "" if value is None else str(value)
+    if not text or text.startswith("'"):
+        return text
+    return "'" + text
+
+
 def normalize_month_value(value: Any) -> str:
     text = strip_literal_prefix(value).strip()
     if not text:
