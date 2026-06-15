@@ -1,10 +1,15 @@
 import unittest
 from datetime import datetime, timezone
+from unittest.mock import patch
+
+import requests
 
 from mba_sales_email_open_monitor import (
     ALLOWED_MBA_OWNER_IDS,
+    DEFAULT_MBA_SLACK_MENTIONS,
     build_registration_url,
     is_mba_page,
+    lookup_slack_mentions_by_email,
     mba_reactivation_filter_groups,
     should_notify_contact,
 )
@@ -64,6 +69,18 @@ class MbaReactivationMonitorTests(unittest.TestCase):
             should_notify_contact(contact, "web:1", {"123"}, datetime.now(timezone.utc), 10),
             "sales_staff_mba not target owner",
         )
+
+    def test_verified_default_mentions_override_stale_external_map(self):
+        stale_map = {"1141449920": "<@U07T2KB9JSH>"}
+
+        with patch("mba_sales_email_open_monitor.time.sleep"), patch(
+            "mba_sales_email_open_monitor.requests.get",
+            side_effect=requests.ConnectTimeout("timed out"),
+        ), patch("mba_sales_email_open_monitor.sys.stderr"):
+            result = lookup_slack_mentions_by_email("token", stale_map)
+
+        self.assertEqual(result["1141449920"], "<@U07TFT3QZTL>")
+        self.assertEqual(result, DEFAULT_MBA_SLACK_MENTIONS)
 
 
 if __name__ == "__main__":

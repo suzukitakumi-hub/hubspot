@@ -96,6 +96,14 @@ MBA_OWNER_EMAILS = {
     "1504551294": "torihara@abitus.co.jp",
 }
 
+DEFAULT_MBA_SLACK_MENTIONS = {
+    "1141449920": "<@U07TFT3QZTL>",  # 津島 恵介
+    "1223691227": "<@U07T2KB9JSH>",  # 栗林 真理絵
+    "875246223": "<@U07T2JL0SRK>",  # 石田 彩
+    "495505977": "<@U07TFD8A81G>",  # 鐘ヶ江 遼平
+    "1504551294": "<@U07TTUTRXS4>",  # 鳥原 大輔
+}
+
 MBA_OWNER_NAMES = {
     "1141449920": "津島 恵介",
     "1223691227": "栗林 真理絵",
@@ -874,10 +882,10 @@ def slack_api_post_webhook(webhook_url: str, payload: dict[str, Any]) -> request
 
 
 def lookup_slack_mentions_by_email(token: str, existing_map: dict[str, str]) -> dict[str, str]:
-    slack_map = dict(existing_map)
+    # Verified defaults are authoritative so an old external map cannot point
+    # a HubSpot owner ID at another staff member's Slack account.
+    slack_map = {**existing_map, **DEFAULT_MBA_SLACK_MENTIONS}
     for owner_id, email in MBA_OWNER_EMAILS.items():
-        if owner_id in slack_map and slack_map[owner_id]:
-            continue
         try:
             data = slack_api_request(
                 token,
@@ -892,8 +900,17 @@ def lookup_slack_mentions_by_email(token: str, existing_map: dict[str, str]) -> 
                 file=sys.stderr,
             )
             continue
-        if data.get("ok") and data.get("user", {}).get("id"):
-            slack_map[owner_id] = f"<@{data['user']['id']}>"
+        user = data.get("user", {})
+        profile_email = str(user.get("profile", {}).get("email") or "").lower()
+        if profile_email and profile_email != email.lower():
+            print(
+                "WARNING: Slack mention lookup returned a different email for "
+                f"{MBA_OWNER_NAMES.get(owner_id, owner_id)}: expected {email}, got {profile_email}",
+                file=sys.stderr,
+            )
+            continue
+        if data.get("ok") and user.get("id"):
+            slack_map[owner_id] = f"<@{user['id']}>"
     return slack_map
 
 
