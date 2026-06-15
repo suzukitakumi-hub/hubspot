@@ -106,6 +106,17 @@ CPA_OWNER_EMAILS = {
     "1182211497": "morimune@abitus.co.jp",
 }
 
+DEFAULT_CPA_SLACK_MENTIONS = {
+    "1878305994": "<@U07SYKH41DL>",  # 高橋 菖太
+    "87109514": "<@U0A574KE1TL>",  # 酒井 萌花
+    "1345885568": "<@U07TA6UR3EJ>",  # 岩﨑 香菜子
+    "741220351": "<@U07U4J37BS4>",  # 中村 佳乃子
+    "80584487": "<@U08SP4MAUNA>",  # 平山 弥怜
+    "83615897": "<@U092LDD9P71>",  # 結城 怜
+    "83615896": "<@U09CS427JAY>",  # 杉山 琉望
+    "1182211497": "<@U07TD3KFYMT>",  # 森宗 峻一
+}
+
 CPA_OWNER_NAMES = {
     "1878305994": "高橋 菖太",
     "87109514": "酒井 萌花",
@@ -853,10 +864,10 @@ def slack_api_post_webhook(webhook_url: str, payload: dict[str, Any]) -> request
 
 
 def lookup_slack_mentions_by_email(token: str, existing_map: dict[str, str]) -> dict[str, str]:
-    slack_map = dict(existing_map)
+    # Verified defaults are authoritative so an old external map cannot point
+    # a HubSpot owner ID at another staff member's Slack account.
+    slack_map = {**existing_map, **DEFAULT_CPA_SLACK_MENTIONS}
     for owner_id, email in CPA_OWNER_EMAILS.items():
-        if owner_id in slack_map and slack_map[owner_id]:
-            continue
         try:
             data = slack_api_request(
                 token,
@@ -871,8 +882,17 @@ def lookup_slack_mentions_by_email(token: str, existing_map: dict[str, str]) -> 
                 file=sys.stderr,
             )
             continue
-        if data.get("ok") and data.get("user", {}).get("id"):
-            slack_map[owner_id] = f"<@{data['user']['id']}>"
+        user = data.get("user", {})
+        profile_email = str(user.get("profile", {}).get("email") or "").lower()
+        if profile_email and profile_email != email.lower():
+            print(
+                "WARNING: Slack mention lookup returned a different email for "
+                f"{CPA_OWNER_NAMES.get(owner_id, owner_id)}: expected {email}, got {profile_email}",
+                file=sys.stderr,
+            )
+            continue
+        if data.get("ok") and user.get("id"):
+            slack_map[owner_id] = f"<@{user['id']}>"
     return slack_map
 
 
