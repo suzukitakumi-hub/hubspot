@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Clone the latest e-learning DM email and schedule it in HubSpot."""
+"""Clone the latest e-learning DM email and send it through HubSpot."""
 
 from __future__ import annotations
 
@@ -46,11 +46,11 @@ SESSION.mount(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Copy the latest published HubSpot e-learning DM and schedule the "
-            "copy for a JST send time."
+            "Copy the latest published HubSpot e-learning DM and publish the "
+            "copy at the JST send time."
         )
     )
-    parser.add_argument("--apply", action="store_true", help="Actually clone/update the HubSpot email.")
+    parser.add_argument("--apply", action="store_true", help="Actually clone/update and publish the HubSpot email.")
     parser.add_argument(
         "--source-email-id",
         default=os.environ.get("HUBSPOT_ELEARNING_SOURCE_EMAIL_ID", "").strip(),
@@ -74,8 +74,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--minimum-lead-minutes",
         type=int,
+        default=0,
+        help="Deprecated. Kept for workflow compatibility.",
+    )
+    parser.add_argument(
+        "--allow-early-minutes",
+        type=int,
         default=5,
-        help="Abort if the scheduled time is less than this many minutes in the future.",
+        help="Allow publishing this many minutes before the nominal JST send time.",
+    )
+    parser.add_argument(
+        "--allow-late-minutes",
+        type=int,
+        default=180,
+        help="Allow publishing this many minutes after the nominal JST send time.",
     )
     parser.add_argument(
         "--output-dir",
@@ -125,6 +137,16 @@ def fetch_email(email_id: str) -> dict[str, Any]:
 def patch_email(email_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     request_json("PATCH", f"/marketing/v3/emails/{email_id}", json=payload)
     return fetch_email(email_id)
+
+
+def publish_email(email_id: str) -> None:
+    response = SESSION.post(
+        BASE_URL + f"/marketing/v3/emails/{email_id}/publish",
+        headers=headers(),
+        json={},
+        timeout=120,
+    )
+    response.raise_for_status()
 
 
 def clone_email(source_id: str, clone_name: str) -> str:
@@ -239,14 +261,13 @@ def email_summary(email: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def clone_verification(source: dict[str, Any], target: dict[str, Any], expected_name: str, expected_utc: str) -> dict[str, bool]:
+def clone_verification(source: dict[str, Any], target: dict[str, Any], expected_name: str) -> dict[str, bool]:
     return {
         "nameOk": target.get("name") == expected_name,
         "subjectSameAsSource": target.get("subject") == source.get("subject"),
-        "stateDraft": target.get("state") == "DRAFT",
-        "isPublishedFalse": target.get("isPublished") is False,
-        "publishDateOk": target.get("publishDate") == expected_utc,
-        "sendOnPublishFalse": target.get("sendOnPublish") is False,
+        "statePublishedOrProcessing": target.get("state") in {"PRE_PROCESSING", "PROCESSING", "PUBLISHED"},
+        "isPublishedTrue": target.get("isPublished") is True,
+        "sendOnPublishTrue": target.get("sendOnPublish") is True,
         "contentSameAsSource": stable_hash(target.get("content")) == stable_hash(source.get("content")),
         "recipientsSameAsSource": stable_hash(target.get("to")) == stable_hash(source.get("to")),
         "fromSameAsSource": stable_hash(target.get("from")) == stable_hash(source.get("from")),
@@ -255,16 +276,30 @@ def clone_verification(source: dict[str, Any], target: dict[str, Any], expected_
     }
 
 
-def ensure_future_schedule(scheduled_jst: datetime, minimum_lead_minutes: int) -> None:
+def ensure_send_window(scheduled_jst: datetime, allow_early_minutes: int, allow_late_minutes: int) -> None:
     now_jst = datetime.now(JST)
-    lead_seconds = (scheduled_jst - now_jst).total_seconds()
-    minimum_seconds = minimum_lead_minutes * 60
-    if lead_seconds < minimum_seconds:
+    early_seconds = (scheduled_jst - now_jst).total_seconds()
+    late_seconds = (now_jst - scheduled_jst).total_seconds()
+    if early_seconds > allow_early_minutes * 60 or late_seconds > allow_late_minutes * 60:
         raise RuntimeError(
-            "Scheduled time is too close or already past: "
+            "Current time is outside the allowed send window: "
             f"now={now_jst.isoformat()} scheduled={scheduled_jst.isoformat()} "
-            f"minimumLeadMinutes={minimum_lead_minutes}"
+            f"allowEarlyMinutes={allow_early_minutes} allowLateMinutes={allow_late_minutes}"
         )
+
+
+def publish_existing_or_new_draft(email_id: str, source: dict[str, Any], target_name: str) -> dict[str, Any]:
+    now_utc = hubspot_utc_string(datetime.now(UTC))
+    target = patch_email(
+        email_id,
+        {
+            "name": target_name,
+            "publishDate": now_utc,
+            "sendOnPublish": True,
+        },
+    )
+    publish_email(str(target["id"]))
+    return fetch_email(str(target["id"]))
 
 
 def main() -> None:
@@ -302,7 +337,7 @@ def main() -> None:
         print(json.dumps(output, ensure_ascii=False, indent=2))
         return
 
-    ensure_future_schedule(scheduled_jst, args.minimum_lead_minutes)
+    ensure_send_window(scheduled_jst, args.allow_early_minutes, args.allow_late_minutes)
 
     if existing_targets:
         target = fetch_email(str(existing_targets[0]["id"]))
@@ -317,32 +352,19 @@ def main() -> None:
             }
             output["allChecksOk"] = all(output["checks"].values())
         elif target.get("state") == "DRAFT":
-            output["action"] = "reuse_existing_draft"
-            target = patch_email(
-                str(target["id"]),
-                {
-                    "publishDate": scheduled_utc,
-                    "sendOnPublish": False,
-                },
-            )
+            output["action"] = "reuse_existing_draft_and_publish"
+            target = publish_existing_or_new_draft(str(target["id"]), source, target_name)
             output["after"] = email_summary(target)
-            output["checks"] = clone_verification(source, target, target_name, scheduled_utc)
+            output["checks"] = clone_verification(source, target, target_name)
             output["allChecksOk"] = all(output["checks"].values())
         else:
             raise RuntimeError(f"Existing target is not editable: {email_summary(target)}")
     else:
-        output["action"] = "clone_and_schedule"
+        output["action"] = "clone_and_publish"
         new_id = clone_email(str(source["id"]), target_name)
-        target = patch_email(
-            new_id,
-            {
-                "name": target_name,
-                "publishDate": scheduled_utc,
-                "sendOnPublish": False,
-            },
-        )
+        target = publish_existing_or_new_draft(new_id, source, target_name)
         output["after"] = email_summary(target)
-        output["checks"] = clone_verification(source, target, target_name, scheduled_utc)
+        output["checks"] = clone_verification(source, target, target_name)
         output["allChecksOk"] = all(output["checks"].values())
 
     write_output(args.output_dir, output)

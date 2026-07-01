@@ -2,12 +2,12 @@ name: HubSpot e-learning DM scheduler
 
 on:
   schedule:
-    # 17:30 JST every Wednesday and Friday = 08:30 UTC.
-    - cron: "30 8 * * 3,5"
+    # 18:00 JST every Wednesday and Friday = 09:00 UTC.
+    - cron: "0 9 * * 3,5"
   workflow_dispatch:
     inputs:
       apply:
-        description: "Actually clone/update and schedule the HubSpot email"
+        description: "Actually clone/update and send the HubSpot email"
         required: true
         default: false
         type: boolean
