@@ -1,0 +1,95 @@
+name: HubSpot e-learning DM scheduler
+
+on:
+  schedule:
+    # 17:30 JST every Wednesday and Friday = 08:30 UTC.
+    - cron: "30 8 * * 3,5"
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Actually clone/update and schedule the HubSpot email"
+        required: true
+        default: false
+        type: boolean
+      send_date_jst:
+        description: "Optional YYYY-MM-DD. Defaults to current JST date."
+        required: false
+        type: string
+      send_time_jst:
+        description: "HH:MM in JST"
+        required: true
+        default: "18:00"
+        type: string
+      source_email_id:
+        description: "Optional source HubSpot email ID. Defaults to latest published matching e-learning DM."
+        required: false
+        type: string
+      target_name:
+        description: "Optional target internal email name."
+        required: false
+        type: string
+
+concurrency:
+  group: hubspot-elearning-dm-scheduler
+  cancel-in-progress: false
+
+jobs:
+  schedule:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      HUBSPOT_PAT: ${{ secrets.HUBSPOT_PAT }}
+      SEND_DATE_JST: ${{ inputs.send_date_jst || '' }}
+      SEND_TIME_JST: ${{ inputs.send_time_jst || '18:00' }}
+      SOURCE_EMAIL_ID_INPUT: ${{ inputs.source_email_id || '' }}
+      TARGET_NAME: ${{ inputs.target_name || '' }}
+      APPLY_INPUT: ${{ inputs.apply || false }}
+      HUBSPOT_ELEARNING_SOURCE_EMAIL_ID: ${{ vars.HUBSPOT_ELEARNING_SOURCE_EMAIL_ID || '' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: requirements-hubspot-course-update.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-hubspot-course-update.txt
+
+      - name: Schedule HubSpot e-learning DM
+        run: |
+          args=(--send-time-jst "${SEND_TIME_JST:-18:00}")
+
+          if [ -n "$SEND_DATE_JST" ]; then
+            args+=(--send-date-jst "$SEND_DATE_JST")
+          fi
+
+          source_email_id="$SOURCE_EMAIL_ID_INPUT"
+          if [ -z "$source_email_id" ]; then
+            source_email_id="$HUBSPOT_ELEARNING_SOURCE_EMAIL_ID"
+          fi
+          if [ -n "$source_email_id" ]; then
+            args+=(--source-email-id "$source_email_id")
+          fi
+
+          if [ -n "$TARGET_NAME" ]; then
+            args+=(--target-name "$TARGET_NAME")
+          fi
+
+          if [ "${{ github.event_name }}" = "schedule" ] || [ "$APPLY_INPUT" = "true" ]; then
+            args+=(--apply)
+          fi
+
+          python schedule_hubspot_elearning_dm.py "${args[@]}"
+
+      - name: Upload run summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hubspot-elearning-dm-scheduler-output
+          path: outputs/hubspot_elearning_dm_*.json
+          if-no-files-found: ignore
