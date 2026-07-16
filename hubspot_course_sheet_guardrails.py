@@ -9,7 +9,7 @@ import random
 import re
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, TypeVar
+from typing import Any, Callable, Dict, List, Sequence, TypeVar
 
 
 JST = dt.timezone(dt.timedelta(hours=9))
@@ -63,10 +63,22 @@ COURSE_SHEET_HEADER = [
 COURSE_SHEET_DISPLAY_HEADER = [value.replace("（", "\n（", 1) if "（" in value else value for value in COURSE_SHEET_HEADER]
 COURSE_SHEET_COLS = len(COURSE_SHEET_HEADER)
 COURSE_SHEET_INDEX = {name: idx for idx, name in enumerate(COURSE_SHEET_HEADER)}
+FORM_CV_COUNT_HEADER = "フォーム送信数（送信後30日）"
+FORM_CV_BREAKDOWN_HEADER = "フォーム別内訳"
+COURSE_SHEET_FORM_DISPLAY_HEADER = list(COURSE_SHEET_DISPLAY_HEADER)
+COURSE_SHEET_FORM_DISPLAY_HEADER[COURSE_SHEET_INDEX["CV数"]] = "フォーム送信数\n（送信後30日）"
+COURSE_SHEET_FORM_DISPLAY_HEADER[COURSE_SHEET_INDEX["CV内訳"]] = FORM_CV_BREAKDOWN_HEADER
 COURSE_SHEET_DISPLAY_TO_LOGICAL = {
     display: logical for logical, display in zip(COURSE_SHEET_HEADER, COURSE_SHEET_DISPLAY_HEADER)
 }
 COURSE_SHEET_DISPLAY_TO_LOGICAL.update({logical: logical for logical in COURSE_SHEET_HEADER})
+COURSE_SHEET_DISPLAY_TO_LOGICAL.update(
+    {
+        "フォーム送信数（送信後30日）": "CV数",
+        "フォーム送信数\n（送信後30日）": "CV数",
+        "フォーム別内訳": "CV内訳",
+    }
+)
 
 DEFAULT_SPREADSHEET_ID = "1i64xFz7mo8xzQ-0ceRfyQtM0GnShuEuu4_W95UWtzKE"
 DEFAULT_SERVICE_ACCOUNT_JSON = "C:/Users/suzuki.takumi/Desktop/AI/Hubspot/micro-environs-470717-j2-58800aec23bb.json"
@@ -388,10 +400,15 @@ def set_worksheet_hidden(spreadsheet, worksheet, hidden: bool) -> None:
     )
 
 
-def write_sheet_values(worksheet, values, apply_formatting: bool = True) -> None:
+def write_sheet_values(
+    worksheet,
+    values,
+    apply_formatting: bool = True,
+    display_header: Sequence[str] | None = None,
+) -> None:
     materialized_values = [list(row) for row in values]
     if materialized_values and normalize_header_row(materialized_values[0]) == COURSE_SHEET_HEADER:
-        materialized_values[0] = list(COURSE_SHEET_DISPLAY_HEADER)
+        materialized_values[0] = list(display_header or COURSE_SHEET_DISPLAY_HEADER)
     if apply_formatting:
         sheets_call(
             f"{worksheet.title}.pre_text_formats",

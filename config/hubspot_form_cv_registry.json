@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "description": "HubSpotマーケティングメール別フォーム送信数に含める、レビュー済みフォームGUIDの正本。フォーム名だけでは自動追加しない。",
+  "category_order": [
+    "営業特別イベント",
+    "マーケティングイベント予約",
+    "オンライン体験",
+    "セミナー予約",
+    "見積り依頼",
+    "資料請求",
+    "説明会動画",
+    "問合せ",
+    "カウンセリング予約"
+  ],
+  "meetings_routes": {
+    "https://lp.pathmake.co.jp/uscpa/counseling": "https://meetings.hubspot.com/uscpa/uscpa",
+    "https://lp.pathmake.co.jp/mba/counseling": "https://meetings.hubspot.com/mba12/umass"
+  },
+  "known_non_meetings_counseling_routes": [
+    "https://lp.pathmake.co.jp/cfe/counseling",
+    "https://lp.pathmake.co.jp/cia/counseling",
+    "https://lp.pathmake.co.jp/cisa/counseling",
+    "https://lp.pathmake.co.jp/ifrs/counseling",
+    "https://lp.pathmake.co.jp/uscpa/ceeak_entry/counseling"
+  ],
+  "meetings_detection_minimum": 100,
+  "included_forms": {
+    "06e34674-ae05-476a-99a7-6f45be439629": {"name": "AAIA（Advanced in AI Audit） 営業特別イベント予約フォーム", "category": "営業特別イベント"},
+    "574ea8ca-dbf7-4efb-96e8-27b9405645cc": {"name": "CFE（公認不正検査士） 営業特別イベント予約フォーム（複製）", "category": "営業特別イベント"},
+    "03f08950-675f-44c0-8e17-1d3d8b577bb0": {"name": "CIA営業特別イベント予約_法人項目追加版_260226", "category": "営業特別イベント"},
+    "d6147f54-80ce-440a-8ffb-0bb4f003e817": {"name": "CIA営業特別イベント予約（複製）", "category": "営業特別イベント"},
+    "8677a41a-6dc0-4529-90ed-e5420f7f0f7f": {"name": "CISA営業特別イベント予約（複製）", "category": "営業特別イベント"},
+    "ffb77e53-8ea6-40be-b54a-2c8e79fd4de7": {"name": "IFRS営業特別イベント予約フォーム（複製）", "category": "営業特別イベント"},
+    "afbcabc7-c737-4521-9ad4-af3317935c5c": {"name": "USCPA営業特別イベント説明会予約（複製）", "category": "営業特別イベント"},
+
+    "9208a410-b3aa-49f9-9503-3f07576b330b": {"name": "AAIA（Advanced in AI Audit） 体験講義予約フォーム", "category": "オンライン体験"},
+    "cfec77da-a5cd-4870-9a55-d6d1d64f053f": {"name": "CEEAK無料体験申し込み＆振り返り個別カウンセリング予約", "category": "オンライン体験"},
+    "040049b4-c56d-4c9f-8c8e-9fbdf8db919e": {"name": "CFE（公認不正検査士） 体験講義予約フォーム（複製）", "category": "オンライン体験"},
+    "8c525f75-ef95-4b6c-9d5a-17fd38c6c116": {"name": "CIA_体験講義予約（複製）", "category": "オンライン体験"},
+    "cdcb3142-b726-49da-9415-b79a56d272b3": {"name": "CISA_体験講義予約（複製）", "category": "オンライン体験"},
+    "3abf1415-3dd8-4c13-8336-0c7355bc75bf": {"name": "IFRSコース 体験講義予約フォーム（複製）", "category": "オンライン体験"},
+    "69788bb8-0b17-46dc-90df-4b14831a88e6": {"name": "UMass MBA体験講義予約（複製）", "category": "オンライン体験"},
+    "6f6bc7a7-2c87-4bf7-a2a5-3a8669a737b8": {"name": "USCPA体験講義予約（複製）", "category": "オンライン体験"},
+
+    "aeddb97b-1b0c-4cfa-acc9-67f6271b9b61": {"name": "AAIA（Advanced in AI Audit） 説明会予約フォーム", "category": "セミナー予約"},
+    "f8789342-cb85-41f8-bf13-38c34539759f": {"name": "CFE（公認不正検査士） 説明会予約フォーム（複製）", "category": "セミナー予約"},
+    "46223696-037a-466e-aef3-5d853702e2ec": {"name": "CIA_説明会予約_法人項目追加版_260226", "category": "セミナー予約"},
+    "95b4ce64-7b8c-4555-9886-4d14e9928aae": {"name": "CIA_説明会予約（複製）", "category": "セミナー予約"},
+    "7330c6d3-5f8b-47a9-9261-f3fb3554723c": {"name": "CISA_説明会予約（複製）", "category": "セミナー予約"},
+    "bd2f1228-3d83-4cce-bdba-2e676e746e74": {"name": "IFRSコース 説明会予約フォーム（複製）", "category": "セミナー予約"},
+    "09e92a0f-e198-4afa-abb7-a547beac7d9c": {"name": "UMass MBA説明会予約（複製）", "category": "セミナー予約"},
+    "7d515673-1eba-41a2-9e50-874424186c1a": {"name": "USCPA説明会予約（複製）", "category": "セミナー予約"},
+    "7e2ef1d1-4cc9-4b9a-99b9-a0076c74b840": {"name": "USCPA大学生向け説明会予約（複製）", "category": "セミナー予約"},
+
+    "1c7934b1-eeb7-4d68-8c97-c2b9fd30341c": {"name": "CFE お見積り（複製）", "category": "見積り依頼"},
+    "9e41f413-9069-495b-ba7a-03282c310c5e": {"name": "CIA_見積り（複製）", "category": "見積り依頼"},
+    "575cde99-e005-498d-abb8-7f80fd23dbd9": {"name": "CISA お見積りフォーム（複製）", "category": "見積り依頼"},
+    "b58c5ed7-1a9c-4ef2-8c34-b243b12c2159": {"name": "IFRS 見積り依頼（複製）", "category": "見積り依頼"},
+
+    "0451498e-dbbe-4584-8ad2-1ee5ae3c22d4": {"name": "UMass MBAマーケティング特別イベント予約（複製）", "category": "マーケティングイベント予約"},
+
+    "530b5995-c6a6-42c5-ab1b-fdf74d31d553": {"name": "AAIA お問合せ", "category": "問合せ"},
+    "bdd14007-1fcf-4fc3-900e-1008b26051e3": {"name": "CFE お問合せ（複製）", "category": "問合せ"},
+    "d1d1ecc4-cfeb-48eb-8c12-e8e1d7001e0c": {"name": "CIAお問合せ（複製）", "category": "問合せ"},
+    "70f145cb-5632-4699-94f2-104340ef17d7": {"name": "CISA お問合せ（複製）", "category": "問合せ"},
+    "8d699a0a-d1e7-4669-abdc-c075d44ab8de": {"name": "UMass MBA 問合せ（複製）", "category": "問合せ"},
+    "73312146-50f3-4819-aee2-4ce798dba701": {"name": "USCPA 問合わせ（複製）", "category": "問合せ"},
+
+    "9ae5e4da-2a7b-4d74-a335-ec7515b76d97": {"name": "CIA_資料請求（複製）", "category": "資料請求"},
+    "584f8d9e-c29e-428c-b4fa-53e9535171c4": {"name": "UMass MBA資料請求（複製）", "category": "資料請求"},
+    "dbf95624-2afc-41b0-89b7-f7b4f380e44b": {"name": "USCPA資料請求（複製）", "category": "資料請求"},
+
+    "4c340250-eab5-4392-b250-d2b148f9d4b3": {"name": "IFRS説明会動画（複製）", "category": "説明会動画"},
+
+    "9b324627-bb13-4a68-9904-bf59f6c33709": {"name": "CFE（公認不正検査士）個別カウンセリング（複製）", "category": "カウンセリング予約"},
+    "71dab195-fe58-4e6c-a82f-53e6c82a124d": {"name": "CIA（公認内部監査人）個別カウンセリング（複製）", "category": "カウンセリング予約"},
+    "8956f290-7b7b-4304-a5dc-f2c46a9203ef": {"name": "CISA (公認情報システム監査人)　個別カウンセリング（複製）", "category": "カウンセリング予約"}
+  },
+  "excluded_forms": {
+    "f4681b0c-b94f-42b3-b564-79c8e76bbe27": {
+      "name": "三菱重工グループ様専用フォーム",
+      "reason": "対応メール本文に導線がなく、フォームpageUrlにもメールIDがない。hidden utm_contentだけに過去メールIDが残ったため、自動加算しない。"
+    }
+  },
+  "unavailable_excluded_forms": {
+    "454529b5-a86a-4584-a230-6d417475f90c": {
+      "name": "AAIA（Advanced in AI Audit）個別カウンセリング",
+      "reason": "HubSpot上でアーカイブ済みかつsubmission APIがNO_FORMを返す既知フォーム。現行のメール別フォームCVには含めない。"
+    }
+  }
+}

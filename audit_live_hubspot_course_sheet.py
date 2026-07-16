@@ -384,66 +384,6 @@ def main() -> None:
                     field_counter[field_name] += 1
                     per_course_issue_counts[course][issue["code"]] += 1
 
-            actual_cv = parse_sheet_int(display("CV数")) if display("CV数") else 0
-            actual_breakdown = strip_literal_prefix(display("CV内訳"))
-            actual_cv_blank = display("CV数") == "" and display("CV内訳") == ""
-
-            if email_id in blocked_email_ids:
-                if not actual_cv_blank:
-                    issue = {
-                        "code": "unsafe_ga4_not_blank",
-                        "course": course,
-                        "sheet_row": row_idx + 1,
-                        "email_id": email_id,
-                        "email_name": ctx["email_name"],
-                        "actual_cv": actual_cv,
-                        "actual_breakdown": actual_breakdown,
-                    }
-                    issues.append(issue)
-                    issue_counter[issue["code"]] += 1
-                    per_course_issue_counts[course][issue["code"]] += 1
-            else:
-                if display("CV数") == "":
-                    issue = {
-                        "code": "safe_ga4_blank",
-                        "course": course,
-                        "sheet_row": row_idx + 1,
-                        "email_id": email_id,
-                        "email_name": ctx["email_name"],
-                        "expected_cv": ctx["ga4_key_events"],
-                        "expected_breakdown": ctx["ga4_breakdown"],
-                    }
-                    issues.append(issue)
-                    issue_counter[issue["code"]] += 1
-                    per_course_issue_counts[course][issue["code"]] += 1
-                else:
-                    if actual_cv != ctx["ga4_key_events"]:
-                        issue = {
-                            "code": "ga4_cv_mismatch",
-                            "course": course,
-                            "sheet_row": row_idx + 1,
-                            "email_id": email_id,
-                            "email_name": ctx["email_name"],
-                            "actual": actual_cv,
-                            "expected": ctx["ga4_key_events"],
-                        }
-                        issues.append(issue)
-                        issue_counter[issue["code"]] += 1
-                        per_course_issue_counts[course][issue["code"]] += 1
-                    if actual_breakdown != ctx["ga4_breakdown"]:
-                        issue = {
-                            "code": "ga4_breakdown_mismatch",
-                            "course": course,
-                            "sheet_row": row_idx + 1,
-                            "email_id": email_id,
-                            "email_name": ctx["email_name"],
-                            "actual": actual_breakdown,
-                            "expected": ctx["ga4_breakdown"],
-                        }
-                        issues.append(issue)
-                        issue_counter[issue["code"]] += 1
-                        per_course_issue_counts[course][issue["code"]] += 1
-
         missing_live_ids = sorted(set(source_ids_by_course.get(course, [])) - set(live_email_ids))
         for email_id in missing_live_ids:
             issue = {

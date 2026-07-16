@@ -78,6 +78,25 @@ jobs:
           fi
           python scheduled_hubspot_course_update.py "${args[@]}"
 
+      - name: Reconcile HubSpot form conversions
+        env:
+          HUBSPOT_PAT: ${{ secrets.HUBSPOT_PAT }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ runner.temp }}/google-service-account.json
+          HUBSPOT_COURSE_SPREADSHEET_ID: ${{ secrets.HUBSPOT_COURSE_SPREADSHEET_ID }}
+        run: |
+          args=(
+            --write-audit-tab
+            --min-scanned-records 25000
+            --min-counted-submissions 3500
+            --expect-campaign-count 415051841=94
+            --expect-campaign-count 421564239=44
+            --expect-campaign-count 421931967=29
+          )
+          if [ "${{ inputs.skip_promote }}" != "true" ]; then
+            args+=(--apply --update-usage)
+          fi
+          python sync_hubspot_form_cv_sheet.py "${args[@]}"
+
       - name: Upload run logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -85,6 +104,7 @@ jobs:
           name: hubspot-course-sheet-update-logs
           path: |
             logs/course_sheet_updates/
+            logs/form_cv_updates/
             hubspot_course_sheet_validation_*.json
             hubspot_course_sheet_live_audit_*.json
             hubspot_course_source_snapshot_*.json
