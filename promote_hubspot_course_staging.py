@@ -8,6 +8,7 @@ import time
 
 from hubspot_course_sheet_guardrails import (
     COURSE_SHEET_HEADER,
+    COURSE_SHEET_FORM_DISPLAY_HEADER,
     COURSE_SHEET_INDEX,
     COURSE_SHEET_LAST_COLUMN,
     DEFAULT_SERVICE_ACCOUNT_JSON,
@@ -466,6 +467,52 @@ def prepare_live_row_for_write(row: list[str], header_index: dict[str, int], tar
     return out
 
 
+def preserve_form_cv_by_content_id(
+    existing_values: list[list[str]],
+    header_index: dict[str, int],
+) -> dict[str, tuple[str, str]]:
+    preserved: dict[str, tuple[str, str]] = {}
+    subject_idx = header_index["メール件名（HubSpotリンク）"]
+    count_idx = header_index["CV数"]
+    breakdown_idx = header_index["CV内訳"]
+    for row_number, row in enumerate(existing_values[1:], start=2):
+        if not any(cell != "" for cell in row):
+            continue
+        content_id = parse_hyperlink_email_id(row[subject_idx] if subject_idx < len(row) else "")
+        if not content_id:
+            raise SystemExit(f"Live row {row_number} has no marketing email content ID. Promotion aborted.")
+        if content_id in preserved:
+            raise SystemExit(f"Live marketing email content ID is duplicated: {content_id}. Promotion aborted.")
+        preserved[content_id] = (
+            row[count_idx] if count_idx < len(row) else "",
+            row[breakdown_idx] if breakdown_idx < len(row) else "",
+        )
+    return preserved
+
+
+def apply_preserved_form_cv(
+    rows: list[list[str]],
+    preserved: dict[str, tuple[str, str]],
+    header_index: dict[str, int],
+) -> int:
+    subject_idx = header_index["メール件名（HubSpotリンク）"]
+    count_idx = header_index["CV数"]
+    breakdown_idx = header_index["CV内訳"]
+    new_email_count = 0
+    for row in rows:
+        content_id = parse_hyperlink_email_id(row[subject_idx] if subject_idx < len(row) else "")
+        if not content_id:
+            raise SystemExit("Promoted row has no marketing email content ID. Promotion aborted.")
+        if content_id in preserved:
+            count, breakdown = preserved[content_id]
+        else:
+            count, breakdown = "", ""
+            new_email_count += 1
+        row[count_idx] = count
+        row[breakdown_idx] = breakdown
+    return new_email_count
+
+
 def main() -> None:
     args = parse_args()
     if not os.path.exists(args.service_account_json):
@@ -516,6 +563,7 @@ def main() -> None:
     month_idx = header_index["対象月"]
     send_date_idx = header_index["送付日"]
     partial_blank_rows = 0
+    new_form_cv_blank_rows = 0
     live_worksheets_by_course = {}
     for course in TARGET_COURSES:
         source_values = staging_formula_snapshot[staging_tab_title(course)]
@@ -545,9 +593,11 @@ def main() -> None:
         live_ws = live_worksheets_by_course[course]
         existing_values = live_formula_snapshot.get(course, [])
         preserved_rows = []
+        preserved_form_cv: dict[str, tuple[str, str]] = {}
         if existing_values:
             if not header_matches_expected(existing_values[0]):
                 raise SystemExit(f"Live tab {course} header mismatch. Promotion aborted.")
+            preserved_form_cv = preserve_form_cv_by_content_id(existing_values, header_index)
             for row in existing_values[1:]:
                 if not any(cell != "" for cell in row):
                     continue
@@ -555,6 +605,7 @@ def main() -> None:
                     preserved_rows.append(list(row))
         merged_rows = preserved_rows + [list(row) for row in values[1:]]
         merged_rows.sort(key=lambda row: (row[send_date_idx], row[header_index["メール内部名"]]))
+        new_form_cv_blank_rows += apply_preserved_form_cv(merged_rows, preserved_form_cv, header_index)
         required_rows = max(200, len(merged_rows) + 30)
         required_cols = len(COURSE_SHEET_HEADER) + 3
         if live_ws.row_count < required_rows or live_ws.col_count < required_cols:
@@ -576,6 +627,7 @@ def main() -> None:
                 live_ws,
                 output_values,
                 apply_formatting=False,
+                display_header=COURSE_SHEET_FORM_DISPLAY_HEADER,
             ),
         )
         visibility_requests.append(
@@ -613,6 +665,7 @@ def main() -> None:
     print(f"validation_report={os.path.abspath(report_path)}")
     print(f"promotion_mode={promotion_mode}")
     print(f"partial_ga4_blank_rows={partial_blank_rows}")
+    print(f"new_form_cv_blank_rows={new_form_cv_blank_rows}")
     print(f"layout_sync={'enabled' if args.sync_layout else 'skipped'}")
     print(f"live_sheet_updated=https://docs.google.com/spreadsheets/d/{args.spreadsheet_id}/edit")
 

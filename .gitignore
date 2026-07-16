@@ -1,0 +1,4 @@
+__pycache__/
+*.py[cod]
+logs/form_cv_updates/
+qa_tmp/
