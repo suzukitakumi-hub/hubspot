@@ -1,5 +1,6 @@
 import datetime as dt
 import unittest
+from pathlib import Path
 
 from hubspot_form_cv import (
     FINAL_STATUS,
@@ -12,6 +13,7 @@ from hubspot_form_cv import (
     attribute_submission,
     active_marketing_email_urls,
     compute_email_cv,
+    load_registry,
     parse_email_rows,
     submission_from_api,
 )
@@ -26,6 +28,7 @@ from sync_hubspot_form_cv_sheet import (
 
 FORM_GUID = "11111111-1111-1111-1111-111111111111"
 UNKNOWN_GUID = "99999999-9999-9999-9999-999999999999"
+AAIA_REQUEST_GUID = "6d10e910-eebb-42eb-9e48-0b694b3d46a1"
 
 
 def registry(*, meeting_routes=None, known_non_meetings=(), meetings_minimum=0) -> FormRegistry:
@@ -81,6 +84,14 @@ def evidence(
         page_utm_sources=tuple(sources),
         page_utm_media=tuple(media),
     )
+
+
+class ProductionRegistryTests(unittest.TestCase):
+    def test_includes_aaia_request_form(self):
+        config = Path(__file__).resolve().parents[1] / "config" / "hubspot_form_cv_registry.json"
+        rule = load_registry(config).included[AAIA_REQUEST_GUID]
+        self.assertEqual(rule.name, "AAIA_資料請求")
+        self.assertEqual(rule.category, "資料請求")
 
 
 class AttributionTests(unittest.TestCase):
