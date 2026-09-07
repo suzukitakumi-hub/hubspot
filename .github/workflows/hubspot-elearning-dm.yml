@@ -2,8 +2,8 @@ name: HubSpot e-learning DM scheduler
 
 on:
   schedule:
-    # 18:00 JST every Wednesday and Friday = 09:00 UTC.
-    - cron: "0 9 * * 3,5"
+    # Prepare at 09:00 JST; HubSpot schedules delivery for 18:00 JST.
+    - cron: "0 0 * * 3,5"
   workflow_dispatch:
     inputs:
       apply:

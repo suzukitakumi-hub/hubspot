@@ -36,7 +36,7 @@ SESSION.mount(
             status=5,
             backoff_factor=1.0,
             status_forcelist=(429, 500, 502, 503, 504),
-            allowed_methods=None,
+            allowed_methods=frozenset({"GET", "HEAD", "OPTIONS"}),
             raise_on_status=False,
         )
     ),
@@ -80,7 +80,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--allow-early-minutes",
         type=int,
-        default=5,
+        default=720,
         help="Allow publishing this many minutes before the nominal JST send time.",
     )
     parser.add_argument(
@@ -265,9 +265,8 @@ def clone_verification(source: dict[str, Any], target: dict[str, Any], expected_
     return {
         "nameOk": target.get("name") == expected_name,
         "subjectSameAsSource": target.get("subject") == source.get("subject"),
-        "statePublishedOrProcessing": target.get("state") in {"PRE_PROCESSING", "PROCESSING", "PUBLISHED"},
-        "isPublishedTrue": target.get("isPublished") is True,
-        "sendOnPublishTrue": target.get("sendOnPublish") is True,
+        "statePublishedOrScheduled": target.get("state") in {"SCHEDULED", "PRE_PROCESSING", "PROCESSING", "PUBLISHED"},
+        "isPublishedOrScheduled": target.get("isPublished") is True or target.get("state") == "SCHEDULED",
         "contentSameAsSource": stable_hash(target.get("content")) == stable_hash(source.get("content")),
         "recipientsSameAsSource": stable_hash(target.get("to")) == stable_hash(source.get("to")),
         "fromSameAsSource": stable_hash(target.get("from")) == stable_hash(source.get("from")),
@@ -288,16 +287,24 @@ def ensure_send_window(scheduled_jst: datetime, allow_early_minutes: int, allow_
         )
 
 
-def publish_existing_or_new_draft(email_id: str, source: dict[str, Any], target_name: str) -> dict[str, Any]:
-    now_utc = hubspot_utc_string(datetime.now(UTC))
+def publish_existing_or_new_draft(email_id: str, source: dict[str, Any], target_name: str, scheduled_jst: datetime) -> dict[str, Any]:
+    now = datetime.now(UTC)
+    send_now = scheduled_jst <= now
     target = patch_email(
         email_id,
         {
             "name": target_name,
-            "publishDate": now_utc,
-            "sendOnPublish": True,
+            "publishDate": hubspot_utc_string(now if send_now else scheduled_jst),
+            "sendOnPublish": send_now,
         },
     )
+    if target.get("sendOnPublish") is not send_now:
+        raise RuntimeError("HubSpot did not preserve the requested send mode")
+    if not send_now and parse_hubspot_datetime(target.get("publishDate")) != scheduled_jst:
+        raise RuntimeError("HubSpot did not preserve the scheduled delivery time")
+    for field in ("subject", "content", "to", "from", "subscriptionDetails"):
+        if stable_hash(target.get(field)) != stable_hash(source.get(field)):
+            raise RuntimeError(f"Draft differs from source: {field}")
     publish_email(str(target["id"]))
     return fetch_email(str(target["id"]))
 
@@ -308,6 +315,8 @@ def main() -> None:
     args = parse_args()
 
     scheduled_jst = scheduled_datetime(args.send_date_jst, args.send_time_jst)
+    if os.environ.get("GITHUB_EVENT_NAME") == "schedule" and scheduled_jst.weekday() not in {2, 4}:
+        raise RuntimeError("Delayed scheduled run is outside Wednesday/Friday; no email will be sent")
     scheduled_utc = hubspot_utc_string(scheduled_jst)
     target_name = args.target_name.strip() or default_target_name(scheduled_jst)
 
@@ -337,32 +346,33 @@ def main() -> None:
         print(json.dumps(output, ensure_ascii=False, indent=2))
         return
 
-    ensure_send_window(scheduled_jst, args.allow_early_minutes, args.allow_late_minutes)
-
     if existing_targets:
         target = fetch_email(str(existing_targets[0]["id"]))
-        if target.get("isPublished") is True or target.get("state") == "PUBLISHED":
+        if target.get("isPublished") is True or target.get("state") in {"SCHEDULED", "PRE_PROCESSING", "PROCESSING", "PUBLISHED"}:
             output["action"] = "already_published"
             output["after"] = email_summary(target)
             output["checks"] = {
                 "targetExists": True,
                 "alreadyPublished": True,
+                "scheduledTimeOk": target.get("state") != "SCHEDULED" or parse_hubspot_datetime(target.get("publishDate")) == scheduled_jst,
                 "contentSameAsSource": stable_hash(target.get("content")) == stable_hash(source.get("content")),
                 "recipientsSameAsSource": stable_hash(target.get("to")) == stable_hash(source.get("to")),
             }
             output["allChecksOk"] = all(output["checks"].values())
         elif target.get("state") == "DRAFT":
+            ensure_send_window(scheduled_jst, args.allow_early_minutes, args.allow_late_minutes)
             output["action"] = "reuse_existing_draft_and_publish"
-            target = publish_existing_or_new_draft(str(target["id"]), source, target_name)
+            target = publish_existing_or_new_draft(str(target["id"]), source, target_name, scheduled_jst)
             output["after"] = email_summary(target)
             output["checks"] = clone_verification(source, target, target_name)
             output["allChecksOk"] = all(output["checks"].values())
         else:
             raise RuntimeError(f"Existing target is not editable: {email_summary(target)}")
     else:
+        ensure_send_window(scheduled_jst, args.allow_early_minutes, args.allow_late_minutes)
         output["action"] = "clone_and_publish"
         new_id = clone_email(str(source["id"]), target_name)
-        target = publish_existing_or_new_draft(new_id, source, target_name)
+        target = publish_existing_or_new_draft(new_id, source, target_name, scheduled_jst)
         output["after"] = email_summary(target)
         output["checks"] = clone_verification(source, target, target_name)
         output["allChecksOk"] = all(output["checks"].values())

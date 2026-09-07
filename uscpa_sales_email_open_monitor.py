@@ -12,6 +12,8 @@ from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 
 BASE_URL = "https://api.hubapi.com"
@@ -1042,7 +1044,18 @@ def get_gspread_client(service_account_json: str):
     path = Path(service_account_json)
     if not path.exists():
         raise RuntimeError(f"Google service account json not found: {service_account_json}")
-    return gspread.service_account(filename=str(path))
+    client = gspread.service_account(filename=str(path))
+    # Retry reads and fixed-range writes, never append or structural POSTs.
+    client.http_client.session.mount(
+        "https://sheets.googleapis.com/",
+        HTTPAdapter(max_retries=Retry(
+            total=5, backoff_factor=1,
+            status_forcelist=(429, 500, 502, 503, 504),
+            allowed_methods=frozenset({"GET", "PUT", "DELETE"}),
+            raise_on_status=False,
+        )),
+    )
+    return client
 
 
 def normalized_header(values: list[list[Any]], width: int) -> list[str]:
@@ -1161,9 +1174,11 @@ def sync_contact_checkbox_rows(worksheet) -> int:
 
 
 def ensure_worksheet(spreadsheet, title: str):
+    from gspread import WorksheetNotFound
+
     try:
         worksheet = spreadsheet.worksheet(title)
-    except Exception:
+    except WorksheetNotFound:
         worksheet = spreadsheet.add_worksheet(title=title, rows=1000, cols=len(SHEET_HEADERS))
 
     if worksheet.row_count < 1000 or worksheet.col_count < len(SHEET_HEADERS):
