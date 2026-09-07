@@ -6,6 +6,7 @@ from threading import Thread
 
 import requests
 import schedule_hubspot_elearning_dm as dm
+import mba_sales_email_open_monitor as mba
 import uscpa_sales_email_open_monitor as uscpa
 
 
@@ -59,6 +60,26 @@ class RecoveryTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             uscpa.ensure_worksheet(spreadsheet, 'test')
         spreadsheet.add_worksheet.assert_not_called()
+
+    def test_mba_uses_the_same_sheets_retry_policy(self):
+        session = requests.Session()
+        fake_client = Mock()
+        fake_client.http_client.session = session
+        with patch('gspread.service_account', return_value=fake_client), patch.object(mba.Path, 'exists', return_value=True):
+            mba.get_gspread_client('unused')
+        retry = session.get_adapter('https://sheets.googleapis.com/').max_retries
+        self.assertEqual(retry.total, 5)
+        self.assertNotIn('POST', retry.allowed_methods)
+
+    def test_transient_adhoc_list_state_is_retried(self):
+        client = object.__new__(uscpa.HubSpot)
+        client.session = Mock()
+        failed = Mock(status_code=400, text='{"context":{"invalidProcessingType":["ADHOC"]}}')
+        recovered = Mock(status_code=200, text='{"results":[]}', json=lambda: {"results": []})
+        client.session.request.side_effect = [failed, recovered]
+        with patch.object(uscpa.time, 'sleep'):
+            self.assertEqual(client.request('GET', '/crm/v3/lists/6567/memberships'), {"results": []})
+        self.assertEqual(client.session.request.call_count, 2)
 
     def test_morning_and_delayed_runs_schedule_18_not_immediate_send(self):
         scheduled = datetime(2026, 9, 9, 18, tzinfo=dm.JST)

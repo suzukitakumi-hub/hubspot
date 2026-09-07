@@ -199,9 +199,14 @@ class HubSpot:
 
     def request(self, method: str, path: str, **kwargs):
         url = f"{BASE_URL}{path}"
-        for attempt in range(5):
+        for attempt in range(7):
             response = self.session.request(method, url, timeout=60, **kwargs)
-            if response.status_code in (429, 500, 502, 503, 504):
+            transient_list_state = (
+                response.status_code == 400
+                and "/memberships" in path
+                and '"invalidProcessingType":["ADHOC"]' in response.text
+            )
+            if response.status_code in (429, 500, 502, 503, 504) or transient_list_state:
                 time.sleep(2**attempt)
                 continue
             if response.status_code >= 400:
