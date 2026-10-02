@@ -60,6 +60,9 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements-hubspot-course-update.txt
 
+      - name: Test clone verification without sending
+        run: python -m unittest discover -s tests -p 'test_schedule_hubspot_elearning_dm.py'
+
       - name: Schedule HubSpot e-learning DM
         run: |
           args=(--send-time-jst "${SEND_TIME_JST:-18:00}")

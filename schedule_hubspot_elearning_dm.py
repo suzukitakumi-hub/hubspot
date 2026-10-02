@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import sys
+from time import sleep
 from datetime import date, datetime, time, timezone
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,13 @@ JST = ZoneInfo("Asia/Tokyo")
 UTC = timezone.utc
 EMAIL_NAME_PREFIX = "eラーニング動画体験会誘致DM"
 DEFAULT_SEND_TIME_JST = "18:00"
+COPY_FIELDS = {
+    "subject": "subjectSameAsSource",
+    "content": "contentSameAsSource",
+    "to": "recipientsSameAsSource",
+    "from": "fromSameAsSource",
+    "subscriptionDetails": "subscriptionSameAsSource",
+}
 
 SESSION = requests.Session()
 SESSION.mount(
@@ -228,6 +236,29 @@ def stable_hash(value: Any) -> str:
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
+def copy_checks(source: dict[str, Any], target: dict[str, Any]) -> dict[str, bool]:
+    return {
+        check: stable_hash(target.get(field)) == stable_hash(source.get(field))
+        for field, check in COPY_FIELDS.items()
+    }
+
+
+def verify_copy(source: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
+    # A clone's GET response may lag its saved revision. Retry reads only;
+    # a persistent content/recipient difference must still block publication.
+    for attempt in range(6):
+        checks = copy_checks(source, target)
+        if all(checks.values()):
+            return target
+        if attempt < 5:
+            differing = ", ".join(field for field, check in COPY_FIELDS.items() if not checks[check])
+            print(f"Clone read differs ({differing}); retry {attempt + 1}/5", file=sys.stderr)
+            sleep(2)
+            target = fetch_email(str(target["id"]))
+    differing = ", ".join(field for field, check in COPY_FIELDS.items() if not checks[check])
+    raise RuntimeError(f"Draft differs from source after read retries: {differing}")
+
+
 def scheduled_datetime(send_date_jst: str, send_time_jst: str) -> datetime:
     if send_date_jst:
         target_date = date.fromisoformat(send_date_jst)
@@ -264,14 +295,9 @@ def email_summary(email: dict[str, Any]) -> dict[str, Any]:
 def clone_verification(source: dict[str, Any], target: dict[str, Any], expected_name: str) -> dict[str, bool]:
     return {
         "nameOk": target.get("name") == expected_name,
-        "subjectSameAsSource": target.get("subject") == source.get("subject"),
         "statePublishedOrScheduled": target.get("state") in {"SCHEDULED", "PRE_PROCESSING", "PROCESSING", "PUBLISHED"},
         "isPublishedOrScheduled": target.get("isPublished") is True or target.get("state") == "SCHEDULED",
-        "contentSameAsSource": stable_hash(target.get("content")) == stable_hash(source.get("content")),
-        "recipientsSameAsSource": stable_hash(target.get("to")) == stable_hash(source.get("to")),
-        "fromSameAsSource": stable_hash(target.get("from")) == stable_hash(source.get("from")),
-        "subscriptionSameAsSource": stable_hash(target.get("subscriptionDetails"))
-        == stable_hash(source.get("subscriptionDetails")),
+        **copy_checks(source, target),
     }
 
 
@@ -302,11 +328,9 @@ def publish_existing_or_new_draft(email_id: str, source: dict[str, Any], target_
         raise RuntimeError("HubSpot did not preserve the requested send mode")
     if not send_now and parse_hubspot_datetime(target.get("publishDate")) != scheduled_jst:
         raise RuntimeError("HubSpot did not preserve the scheduled delivery time")
-    for field in ("subject", "content", "to", "from", "subscriptionDetails"):
-        if stable_hash(target.get(field)) != stable_hash(source.get(field)):
-            raise RuntimeError(f"Draft differs from source: {field}")
+    target = verify_copy(source, target)
     publish_email(str(target["id"]))
-    return fetch_email(str(target["id"]))
+    return verify_copy(source, fetch_email(str(target["id"])))
 
 
 def main() -> None:
@@ -341,7 +365,11 @@ def main() -> None:
     }
 
     if not args.apply:
-        output["allChecksOk"] = True
+        if existing_targets:
+            target = verify_copy(source, fetch_email(str(existing_targets[0]["id"])))
+            output["after"] = email_summary(target)
+            output["checks"] = copy_checks(source, target)
+        output["allChecksOk"] = all(output["checks"].values())
         write_output(args.output_dir, output)
         print(json.dumps(output, ensure_ascii=False, indent=2))
         return
@@ -349,14 +377,14 @@ def main() -> None:
     if existing_targets:
         target = fetch_email(str(existing_targets[0]["id"]))
         if target.get("isPublished") is True or target.get("state") in {"SCHEDULED", "PRE_PROCESSING", "PROCESSING", "PUBLISHED"}:
+            target = verify_copy(source, target)
             output["action"] = "already_published"
             output["after"] = email_summary(target)
             output["checks"] = {
                 "targetExists": True,
                 "alreadyPublished": True,
                 "scheduledTimeOk": target.get("state") != "SCHEDULED" or parse_hubspot_datetime(target.get("publishDate")) == scheduled_jst,
-                "contentSameAsSource": stable_hash(target.get("content")) == stable_hash(source.get("content")),
-                "recipientsSameAsSource": stable_hash(target.get("to")) == stable_hash(source.get("to")),
+                **copy_checks(source, target),
             }
             output["allChecksOk"] = all(output["checks"].values())
         elif target.get("state") == "DRAFT":
