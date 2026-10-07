@@ -2,12 +2,12 @@ name: HubSpot e-learning DM scheduler
 
 on:
   schedule:
-    # Prepare at 09:00 JST; HubSpot schedules delivery for 18:00 JST.
+    # Prepare a draft at 09:00 JST. A human confirms delivery in HubSpot.
     - cron: "0 0 * * 3,5"
   workflow_dispatch:
     inputs:
       apply:
-        description: "Actually clone/update and send the HubSpot email"
+        description: "Prepare a verified draft only (never sends or schedules delivery)"
         required: true
         default: false
         type: boolean
@@ -63,7 +63,7 @@ jobs:
       - name: Test clone verification without sending
         run: python -m unittest discover -s tests -p 'test_schedule_hubspot_elearning_dm.py'
 
-      - name: Schedule HubSpot e-learning DM
+      - name: Prepare HubSpot e-learning DM draft (human delivery confirmation required)
         run: |
           args=(--send-time-jst "${SEND_TIME_JST:-18:00}")
 

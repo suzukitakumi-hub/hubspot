@@ -15,7 +15,7 @@ class RecoveryTests(unittest.TestCase):
         scheduled = datetime(2026, 9, 9, 18, tzinfo=dm.JST)
         email = {'id': '1', 'name': 'test', 'state': 'SCHEDULED', 'publishDate': dm.hubspot_utc_string(scheduled)}
         args = Mock(send_date_jst='2026-09-09', send_time_jst='18:00', target_name='test', source_email_id='', apply=True)
-        with patch.object(dm, 'parse_args', return_value=args), patch.object(dm, 'load_dotenv'), patch.object(dm, 'list_marketing_emails', return_value=[email]), patch.object(dm, 'find_source_email', return_value=email), patch.object(dm, 'fetch_email', return_value=email), patch.object(dm, 'write_output'), patch.object(dm, 'publish_email') as publish, patch.object(dm, 'clone_email') as clone, patch('builtins.print'):
+        with patch.object(dm, 'parse_args', return_value=args), patch.object(dm, 'load_dotenv'), patch.object(dm, 'request_json', return_value={'portalId': dm.PORTAL_ID}), patch.object(dm, 'list_marketing_emails', return_value=[email]), patch.object(dm, 'find_source_email', return_value=email), patch.object(dm, 'fetch_email', return_value=email), patch.object(dm, 'write_output'), patch.object(dm, 'publish_email') as publish, patch.object(dm, 'clone_email') as clone, patch('builtins.print'):
             dm.main()
         publish.assert_not_called()
         clone.assert_not_called()
@@ -81,20 +81,20 @@ class RecoveryTests(unittest.TestCase):
             self.assertEqual(client.request('GET', '/crm/v3/lists/6567/memberships'), {"results": []})
         self.assertEqual(client.session.request.call_count, 2)
 
-    def test_morning_and_delayed_runs_schedule_18_not_immediate_send(self):
+    def test_morning_and_delayed_runs_leave_18_as_draft_metadata_only(self):
         scheduled = datetime(2026, 9, 9, 18, tzinfo=dm.JST)
         for hour in (9, 13, 17):
             with self.subTest(hour=hour), patch.object(dm, 'datetime', wraps=datetime) as clock:
                 clock.now.return_value = scheduled.replace(hour=hour)
                 dm.ensure_send_window(scheduled, 720, 180)
                 source = {'subject': 'test', 'content': {}, 'to': {}, 'from': {}, 'subscriptionDetails': {}}
-                draft = dict(source, id='1', name='test', publishDate=dm.hubspot_utc_string(scheduled), sendOnPublish=False)
-                with patch.object(dm, 'patch_email', return_value=draft) as update, patch.object(dm, 'publish_email') as publish, patch.object(dm, 'fetch_email', return_value=dict(draft, state='SCHEDULED')):
-                    result = dm.publish_existing_or_new_draft('1', source, 'test', scheduled)
+                draft = dict(source, id='1', name='test', state='DRAFT', isPublished=False, publishDate=dm.hubspot_utc_string(scheduled), sendOnPublish=False)
+                with patch.object(dm, 'patch_email', return_value=draft) as update, patch.object(dm, 'publish_email') as publish, patch.object(dm, 'fetch_email', return_value=dict(draft, publishDate=None)):
+                    result = dm.prepare_draft('1', source, 'test', scheduled)
                 self.assertFalse(update.call_args.args[1]['sendOnPublish'])
                 self.assertEqual(update.call_args.args[1]['publishDate'], '2026-09-09T09:00:00Z')
-                self.assertEqual(result['state'], 'SCHEDULED')
-                publish.assert_called_once_with('1')
+                self.assertEqual(result['state'], 'DRAFT')
+                publish.assert_not_called()
 
     def test_22_hour_run_still_rejected(self):
         scheduled = datetime(2026, 9, 9, 18, tzinfo=dm.JST)
@@ -105,9 +105,10 @@ class RecoveryTests(unittest.TestCase):
 
     def test_bad_send_mode_stops_before_publish(self):
         scheduled = datetime(2099, 9, 9, 18, tzinfo=dm.JST)
-        with patch.object(dm, 'patch_email', return_value={'id': '1', 'sendOnPublish': True}), patch.object(dm, 'publish_email') as publish:
+        draft = {'id': '1', 'state': 'DRAFT', 'isPublished': False}
+        with patch.object(dm, 'fetch_email', return_value=draft), patch.object(dm, 'patch_email', return_value={'id': '1', 'sendOnPublish': True}), patch.object(dm, 'publish_email') as publish:
             with self.assertRaises(RuntimeError):
-                dm.publish_existing_or_new_draft('1', {}, 'test', scheduled)
+                dm.prepare_draft('1', {}, 'test', scheduled)
             publish.assert_not_called()
 
 
