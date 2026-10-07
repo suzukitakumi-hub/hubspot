@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Clone the latest e-learning DM email and send it through HubSpot."""
+"""Prepare and verify an e-learning DM draft; a human confirms delivery."""
 
 from __future__ import annotations
 
@@ -54,11 +54,11 @@ SESSION.mount(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Copy the latest published HubSpot e-learning DM and publish the "
-            "copy at the JST send time."
+            "Copy the latest published HubSpot e-learning DM into a verified "
+            "draft. Delivery must be confirmed in HubSpot by a human."
         )
     )
-    parser.add_argument("--apply", action="store_true", help="Actually clone/update and publish the HubSpot email.")
+    parser.add_argument("--apply", action="store_true", help="Actually prepare the draft. Never publishes or sends.")
     parser.add_argument(
         "--source-email-id",
         default=os.environ.get("HUBSPOT_ELEARNING_SOURCE_EMAIL_ID", "").strip(),
@@ -139,7 +139,15 @@ def request_json(method: str, path: str, **kwargs: Any) -> dict[str, Any]:
 
 
 def fetch_email(email_id: str) -> dict[str, Any]:
-    return request_json("GET", f"/marketing/v3/emails/{email_id}")
+    email = request_json("GET", f"/marketing/v3/emails/{email_id}")
+    if email.get("state") == "DRAFT" and not email.get("isPublished"):
+        # The generic endpoint can omit a draft's saved flexAreas sections.
+        # Compare the actual draft, not an incomplete generic representation.
+        draft = request_json("GET", f"/marketing/v3/emails/{email_id}/draft")
+        if str(draft.get("id")) != str(email_id) or draft.get("state") != "DRAFT" or draft.get("isPublished"):
+            raise RuntimeError("Email state changed while fetching its draft; no writes performed")
+        return draft
+    return email
 
 
 def patch_email(email_id: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -148,13 +156,7 @@ def patch_email(email_id: str, payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def publish_email(email_id: str) -> None:
-    response = SESSION.post(
-        BASE_URL + f"/marketing/v3/emails/{email_id}/publish",
-        headers=headers(),
-        json={},
-        timeout=120,
-    )
-    response.raise_for_status()
+    raise RuntimeError("Delivery requires human confirmation in HubSpot; API publication is disabled")
 
 
 def clone_email(source_id: str, clone_name: str) -> str:
@@ -295,8 +297,9 @@ def email_summary(email: dict[str, Any]) -> dict[str, Any]:
 def clone_verification(source: dict[str, Any], target: dict[str, Any], expected_name: str) -> dict[str, bool]:
     return {
         "nameOk": target.get("name") == expected_name,
-        "statePublishedOrScheduled": target.get("state") in {"SCHEDULED", "PRE_PROCESSING", "PROCESSING", "PUBLISHED"},
-        "isPublishedOrScheduled": target.get("isPublished") is True or target.get("state") == "SCHEDULED",
+        "stateDraft": target.get("state") == "DRAFT",
+        "isUnpublished": target.get("isPublished") is False,
+        "sendOnPublishFalse": target.get("sendOnPublish") is False,
         **copy_checks(source, target),
     }
 
@@ -313,24 +316,29 @@ def ensure_send_window(scheduled_jst: datetime, allow_early_minutes: int, allow_
         )
 
 
-def publish_existing_or_new_draft(email_id: str, source: dict[str, Any], target_name: str, scheduled_jst: datetime) -> dict[str, Any]:
-    now = datetime.now(UTC)
-    send_now = scheduled_jst <= now
+def prepare_draft(email_id: str, source: dict[str, Any], target_name: str, scheduled_jst: datetime) -> dict[str, Any]:
+    target = verify_copy(source, fetch_email(email_id))
+    if target.get("state") != "DRAFT" or target.get("isPublished"):
+        raise RuntimeError("Only an unpublished draft can be prepared")
+    if (target.get("name") == target_name and target.get("sendOnPublish") is False
+            and parse_hubspot_datetime(target.get("publishDate")) == scheduled_jst):
+        return target
     target = patch_email(
         email_id,
         {
             "name": target_name,
-            "publishDate": hubspot_utc_string(now if send_now else scheduled_jst),
-            "sendOnPublish": send_now,
+            "publishDate": hubspot_utc_string(scheduled_jst),
+            "sendOnPublish": False,
         },
     )
-    if target.get("sendOnPublish") is not send_now:
+    if target.get("sendOnPublish") is not False:
         raise RuntimeError("HubSpot did not preserve the requested send mode")
-    if not send_now and parse_hubspot_datetime(target.get("publishDate")) != scheduled_jst:
+    if parse_hubspot_datetime(target.get("publishDate")) != scheduled_jst:
         raise RuntimeError("HubSpot did not preserve the scheduled delivery time")
     target = verify_copy(source, target)
-    publish_email(str(target["id"]))
-    return verify_copy(source, fetch_email(str(target["id"])))
+    if not all(clone_verification(source, target, target_name).values()):
+        raise RuntimeError("Prepared email is not a verified unpublished draft")
+    return target
 
 
 def main() -> None:
@@ -340,7 +348,10 @@ def main() -> None:
 
     scheduled_jst = scheduled_datetime(args.send_date_jst, args.send_time_jst)
     if os.environ.get("GITHUB_EVENT_NAME") == "schedule" and scheduled_jst.weekday() not in {2, 4}:
-        raise RuntimeError("Delayed scheduled run is outside Wednesday/Friday; no email will be sent")
+        print("Delayed scheduled run is outside Wednesday/Friday; skipped without writes")
+        return
+    if args.apply and str(request_json("GET", "/account-info/v3/details").get("portalId")) != PORTAL_ID:
+        raise RuntimeError("HubSpot portal does not match the approved account; no writes performed")
     scheduled_utc = hubspot_utc_string(scheduled_jst)
     target_name = args.target_name.strip() or default_target_name(scheduled_jst)
 
@@ -362,6 +373,7 @@ def main() -> None:
         "after": None,
         "checks": {},
         "allChecksOk": False,
+        "deliveryRequiresHumanConfirmation": True,
     }
 
     if not args.apply:
@@ -388,19 +400,17 @@ def main() -> None:
             }
             output["allChecksOk"] = all(output["checks"].values())
         elif target.get("state") == "DRAFT":
-            ensure_send_window(scheduled_jst, args.allow_early_minutes, args.allow_late_minutes)
-            output["action"] = "reuse_existing_draft_and_publish"
-            target = publish_existing_or_new_draft(str(target["id"]), source, target_name, scheduled_jst)
+            output["action"] = "reuse_existing_draft"
+            target = prepare_draft(str(target["id"]), source, target_name, scheduled_jst)
             output["after"] = email_summary(target)
             output["checks"] = clone_verification(source, target, target_name)
             output["allChecksOk"] = all(output["checks"].values())
         else:
             raise RuntimeError(f"Existing target is not editable: {email_summary(target)}")
     else:
-        ensure_send_window(scheduled_jst, args.allow_early_minutes, args.allow_late_minutes)
-        output["action"] = "clone_and_publish"
+        output["action"] = "clone_and_prepare_draft"
         new_id = clone_email(str(source["id"]), target_name)
-        target = publish_existing_or_new_draft(new_id, source, target_name, scheduled_jst)
+        target = prepare_draft(new_id, source, target_name, scheduled_jst)
         output["after"] = email_summary(target)
         output["checks"] = clone_verification(source, target, target_name)
         output["allChecksOk"] = all(output["checks"].values())
