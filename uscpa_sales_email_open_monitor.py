@@ -84,6 +84,8 @@ ALLOWED_SENDERS = {
     "sugiyama.runo@abitus.co.jp",
     "info+morimune@abitus.co.jp",
     "morimune@abitus.co.jp",
+    "info+okamura@abitus.co.jp",
+    "okamura@abitus.co.jp",
 }
 
 ALLOWED_CPA_OWNER_IDS = {
@@ -95,6 +97,7 @@ ALLOWED_CPA_OWNER_IDS = {
     "83615897",  # 結城 怜
     "83615896",  # 杉山 琉望
     "1182211497",  # 森宗 峻一
+    "96680400",  # 岡村 琴衣
 }
 
 CPA_OWNER_EMAILS = {
@@ -106,6 +109,7 @@ CPA_OWNER_EMAILS = {
     "83615897": "yuki.ren@abitus.co.jp",
     "83615896": "sugiyama.runo@abitus.co.jp",
     "1182211497": "morimune@abitus.co.jp",
+    "96680400": "okamura@abitus.co.jp",
 }
 
 DEFAULT_CPA_SLACK_MENTIONS = {
@@ -117,6 +121,7 @@ DEFAULT_CPA_SLACK_MENTIONS = {
     "83615897": "<@U092LDD9P71>",  # 結城 怜
     "83615896": "<@U09CS427JAY>",  # 杉山 琉望
     "1182211497": "<@U07TD3KFYMT>",  # 森宗 峻一
+    "96680400": "<@U0BLT22T1J6>",  # 岡村 琴衣
 }
 
 CPA_OWNER_NAMES = {
@@ -128,6 +133,7 @@ CPA_OWNER_NAMES = {
     "83615897": "結城 怜",
     "83615896": "杉山 琉望",
     "1182211497": "森宗 峻一",
+    "96680400": "岡村 琴衣",
 }
 
 CONTACT_PROPS = [
