@@ -78,6 +78,9 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements-hubspot-course-update.txt
 
+      - name: Test monitor recovery
+        run: python -m unittest tests.test_uscpa_reactivation_monitor tests.test_uscpa_slack_resilience tests.test_uscpa_web_page_context
+
       - name: Write Google service account JSON
         if: ${{ github.event_name == 'schedule' || inputs.sheet_output == true || inputs.sheet_setup_only == true }}
         env:
