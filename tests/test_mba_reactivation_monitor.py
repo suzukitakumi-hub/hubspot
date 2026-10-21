@@ -4,17 +4,16 @@ from datetime import datetime, timezone
 from unittest.mock import Mock, call, patch
 
 import requests
+import mba_sales_email_open_monitor as mba
 
 from mba_sales_email_open_monitor import (
     ALLOWED_MBA_OWNER_IDS,
     DEFAULT_MBA_SLACK_MENTIONS,
-    HubSpot,
     build_registration_url,
     is_mba_page,
     lookup_slack_mentions_by_email,
     mba_reactivation_filter_groups,
     should_notify_contact,
-    search_open_emails,
 )
 
 
@@ -87,12 +86,15 @@ class MbaReactivationMonitorTests(unittest.TestCase):
 
 
 class HubSpotReadRecoveryTests(unittest.TestCase):
+    monitor = mba
+    max_attempts = 5
+
     def setUp(self):
         # A synthetic credential is consumed locally; all HTTP and waits are mocked.
         with patch.dict("os.environ", {"HUBSPOT_PAT": "local-test-only"}):
-            self.client = HubSpot()
+            self.client = self.monitor.HubSpot()
         self.send = self.client.session.request = Mock()
-        sleeper = patch("mba_sales_email_open_monitor.time.sleep")
+        sleeper = patch.object(self.monitor.time, "sleep")
         self.sleep = sleeper.start()
         self.addCleanup(sleeper.stop)
 
@@ -108,7 +110,7 @@ class HubSpotReadRecoveryTests(unittest.TestCase):
             requests.ConnectionError("Connection aborted.", RemoteDisconnected("Remote end closed connection without response")),
             self.response(payload={"results": [{"id": "test-email"}]}),
         ]
-        result = search_open_emails(self.client, "mba@abitus.co.jp", "123", 200)
+        result = self.monitor.search_open_emails(self.client, "test@abitus.co.jp", "123", 200)
         self.assertEqual(result, [{"id": "test-email"}])
         self.assertEqual(self.send.call_count, 2)
         self.assertEqual(self.send.call_args_list[0], self.send.call_args_list[1])
@@ -138,13 +140,13 @@ class HubSpotReadRecoveryTests(unittest.TestCase):
         self.assertEqual(self.send.call_count, 4)
         self.assertEqual(self.sleep.call_args_list, [call(1), call(2), call(4)])
 
-    def test_persistent_connection_failure_stops_after_five_attempts(self):
+    def test_persistent_connection_failure_stops_at_attempt_limit(self):
         self.send.side_effect = requests.ConnectionError("persistent")
-        with self.assertRaisesRegex(RuntimeError, "failed after 5 attempts") as raised:
+        with self.assertRaisesRegex(RuntimeError, f"failed after {self.max_attempts} attempts") as raised:
             self.client.request("POST", "/crm/v3/objects/emails/search")
         self.assertIsInstance(raised.exception.__cause__, requests.ConnectionError)
-        self.assertEqual(self.send.call_count, 5)
-        self.assertEqual(self.sleep.call_args_list, [call(1), call(2), call(4), call(8)])
+        self.assertEqual(self.send.call_count, self.max_attempts)
+        self.assertEqual(self.sleep.call_args_list, [call(2**i) for i in range(self.max_attempts - 1)])
 
     def test_transient_http_statuses_recover_and_persistent_errors_still_fail(self):
         for status in [429, 500, 502, 503, 504]:
@@ -159,8 +161,8 @@ class HubSpotReadRecoveryTests(unittest.TestCase):
         self.send.return_value = self.response(503)
         with self.assertRaisesRegex(RuntimeError, "failed: 503"):
             self.client.request("GET", "/account-info/v3/details")
-        self.assertEqual(self.send.call_count, 5)
-        self.assertEqual(self.sleep.call_args_list, [call(1), call(2), call(4), call(8)])
+        self.assertEqual(self.send.call_count, self.max_attempts)
+        self.assertEqual(self.sleep.call_args_list, [call(2**i) for i in range(self.max_attempts - 1)])
 
     def test_auth_and_validation_errors_are_not_retried(self):
         for status in [400, 401, 403, 404]:

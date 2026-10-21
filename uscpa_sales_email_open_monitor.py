@@ -205,14 +205,28 @@ class HubSpot:
 
     def request(self, method: str, path: str, **kwargs):
         url = f"{BASE_URL}{path}"
+        # Search and batch/read use POST but are safe to repeat; writes may trigger notifications.
+        retryable_read = method.upper() in {"GET", "HEAD"} or (
+            method.upper() == "POST" and path.endswith(("/search", "/batch/read"))
+        )
         for attempt in range(7):
-            response = self.session.request(method, url, timeout=60, **kwargs)
+            try:
+                response = self.session.request(method, url, timeout=60, **kwargs)
+            except requests.exceptions.SSLError:
+                raise
+            except (requests.ConnectionError, requests.Timeout) as exc:
+                if not retryable_read:
+                    raise
+                if attempt == 6:
+                    raise RuntimeError(f"{method} {path} failed after 7 attempts") from exc
+                time.sleep(2**attempt)
+                continue
             transient_list_state = (
                 response.status_code == 400
                 and "/memberships" in path
                 and '"invalidProcessingType":["ADHOC"]' in response.text
             )
-            if response.status_code in (429, 500, 502, 503, 504) or transient_list_state:
+            if retryable_read and (response.status_code in (429, 500, 502, 503, 504) or transient_list_state) and attempt < 6:
                 time.sleep(2**attempt)
                 continue
             if response.status_code >= 400:
