@@ -185,9 +185,23 @@ class HubSpot:
 
     def request(self, method: str, path: str, **kwargs):
         url = f"{BASE_URL}{path}"
+        # Search and batch/read use POST but are safe to repeat; writes may trigger notifications.
+        retryable_read = method.upper() in {"GET", "HEAD"} or (
+            method.upper() == "POST" and path.endswith(("/search", "/batch/read"))
+        )
         for attempt in range(5):
-            response = self.session.request(method, url, timeout=60, **kwargs)
-            if response.status_code in (429, 500, 502, 503, 504):
+            try:
+                response = self.session.request(method, url, timeout=60, **kwargs)
+            except requests.exceptions.SSLError:
+                raise
+            except (requests.ConnectionError, requests.Timeout) as exc:
+                if not retryable_read:
+                    raise
+                if attempt == 4:
+                    raise RuntimeError(f"{method} {path} failed after 5 attempts") from exc
+                time.sleep(2**attempt)
+                continue
+            if retryable_read and response.status_code in (429, 500, 502, 503, 504) and attempt < 4:
                 time.sleep(2**attempt)
                 continue
             if response.status_code >= 400:
